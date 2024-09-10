@@ -4,6 +4,7 @@ Parse and stream record3d captures. To get the demo data, see `./assets/download
 """
 
 import time
+import sys
 from pathlib import Path
 
 import numpy as onp
@@ -16,7 +17,7 @@ import viser.transforms as tf
 
 
 def main(
-    data_path: Path = Path("/ssd2/junyi/dust3r/checkpoints/eval_sintel_monocular_depth_3datasets_3_7_epoch32_tmp0.01_swinstride5_flow0.01_0.2_35_gt_mask_iter300_fullseq/0/sleeping_2"),
+    data_path: Path = Path("/ssd2/junyi/dust3r/checkpoints/eval_sintel_monocular_depth_3datasets_3_7_epoch32_tmp0.01_swinstride5_flow0.01_0.2_35_gt_mask_iter300_fullseq/0/alley_2"),
     downsample_factor: int = 1,
     max_frames: int = 100,
     share: bool = False,
@@ -24,6 +25,8 @@ def main(
     server = viser.ViserServer()
     if share:
         server.request_share_url()
+
+    server.scene.set_up_direction('-z')
 
     print("Loading frames!")
     loader = viser.extras.Record3dLoader_Customized(data_path)
@@ -119,7 +122,7 @@ def main(
             f"/frames/t{i}/frustum",
             fov=fov,
             aspect=aspect,
-            scale=0.05,
+            scale=0.02,
             image=frame.rgb[::downsample_factor, ::downsample_factor],
             wxyz=tf.SO3.from_matrix(frame.T_world_camera[:3, :3]).wxyz,
             position=frame.T_world_camera[:3, 3],
@@ -157,4 +160,9 @@ def main(
 
 
 if __name__ == "__main__":
-    tyro.cli(main)
+    # get the path to the data with first argument of the command
+    try:
+        data_path = Path(sys.argv[1])
+    except IndexError:
+        data_path = Path("/ssd2/junyi/dust3r/checkpoints/eval_sintel_monocular_depth_3datasets_3_7_epoch32_tmp0.01_swinstride5_flow0.01_0.2_35_gt_mask_iter300_fullseq/0/alley_2")
+    tyro.cli(main(data_path=data_path))
