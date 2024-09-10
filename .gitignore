@@ -17,3 +17,4 @@ htmlcov
 build
 src/viser/client/build
 src/viser/client/.nodeenv
+record3d_dance

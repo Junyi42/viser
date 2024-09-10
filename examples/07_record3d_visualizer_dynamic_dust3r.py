@@ -26,7 +26,7 @@ def main(
         server.request_share_url()
 
     print("Loading frames!")
-    loader = viser.extras.Record3dLoader(data_path)
+    loader = viser.extras.Record3dLoader_Customized(data_path)
     num_frames = min(max_frames, loader.num_frames())
 
     # Add playback UI.
