@@ -21,50 +21,60 @@ class Record3dLoader_Customized:
     # `examples/7_record3d_visualizer.py` since it is usecase-specific.
 
     def __init__(self, data_dir: Path):
-        metadata_path = data_dir / "metadata"
 
         # Read metadata.
-        metadata = json.loads(metadata_path.read_text())
+        intrinsics_path = data_dir / "pred_intrinsics.txt"
+        intrinsics = np.loadtxt(intrinsics_path)
 
-        K: onp.ndarray = np.array(metadata["K"], np.float32).reshape(3, 3)
-        fps = metadata["fps"]
+        K: onp.ndarray = np.array(intrinsics, np.float32).reshape(-1, 3, 3)
+        fps = 30
 
-        T_world_cameras: onp.ndarray = np.array(metadata["poses"], np.float32)
+        poses_path = data_dir / "pred_traj.txt"
+        poses = np.loadtxt(poses_path)
+        T_world_cameras: onp.ndarray = np.array(poses, np.float32)
         T_world_cameras = np.concatenate(
-            [
-                Rotation.from_quat(T_world_cameras[:, :4]).as_matrix(),
-                T_world_cameras[:, 4:, None],
+            [   # convert tum pose to se3 pose
+                # Rotation.from_quat(np.concatenate([T_world_cameras[:, 5:], T_world_cameras[:,4:5]], -1)).as_matrix(),
+                Rotation.from_quat(T_world_cameras[:, 4:]).as_matrix(),
+                T_world_cameras[:, 1:4, None],
             ],
             -1,
         )
-        T_world_cameras = (T_world_cameras @ np.diag([1, -1, -1, 1])).astype(np.float32)
+        T_world_cameras = (T_world_cameras @ np.diag([1, 1, 1, 1])).astype(np.float32)
 
-        self.K = K
         self.fps = fps
+        self.K = K
         self.T_world_cameras = T_world_cameras
 
-        rgbd_dir = data_dir / "rgbd"
-        self.rgb_paths = sorted(rgbd_dir.glob("*.jpg"), key=lambda p: int(p.stem))
-        self.depth_paths = [
-            rgb_path.with_suffix(".depth") for rgb_path in self.rgb_paths
-        ]
-        self.conf_paths = [rgb_path.with_suffix(".conf") for rgb_path in self.rgb_paths]
-        self.mask_paths = [rgb_path.with_suffix(".mask") for rgb_path in self.rgb_paths]
+        # Read frames.
+        self.rgb_paths = sorted(data_dir.glob("frame_*.png"), key=lambda p: int(p.stem.split("_")[-1]))
+        self.depth_paths = sorted(data_dir.glob("frame_*.npy"), key=lambda p: int(p.stem.split("_")[-1]))
+        self.conf_paths = sorted(data_dir.glob("conf_*.npy"), key=lambda p: int(p.stem.split("_")[-1]))
+        self.mask_paths = sorted(data_dir.glob("dynamic_mask_*.png"), key=lambda p: int(p.stem.split("_")[-1]))
+
+        # remove the last frame since it does not have gt dynamic mask
+        self.rgb_paths = self.rgb_paths[:-1]
 
     def num_frames(self) -> int:
         return len(self.rgb_paths)
 
     def get_frame(self, index: int) -> Record3dFrame:
         # Read conf.
+        conf = np.load(self.conf_paths[index])
+        conf: onpt.NDArray[onp.float32] = conf
 
         # Read depth.
+        depth = np.load(self.depth_paths[index])
+        depth: onpt.NDArray[onp.float32] = depth
 
         # Read mask.
+        mask = iio.imread(self.mask_paths[index]) > 0
+        mask: onpt.NDArray[onp.bool_] = mask
 
         # Read RGB.
         rgb = iio.imread(self.rgb_paths[index])
         return Record3dFrame(
-            K=self.K,
+            K=self.K[index],
             rgb=rgb,
             depth=depth,
             mask=mask,
@@ -110,5 +120,11 @@ class Record3dFrame:
         dirs = np.einsum("ij,bj->bi", T_world_camera[:3, :3], local_dirs)
         points = (T_world_camera[:, -1] + dirs * depth[mask, None]).astype(np.float32)
         point_colors = rgb[mask]
+        
+        bg_homo_grid = np.pad(grid[~mask], np.array([[0, 0], [0, 1]]), constant_values=1)
+        bg_local_dirs = np.einsum("ij,bj->bi", np.linalg.inv(K), bg_homo_grid)
+        bg_dirs = np.einsum("ij,bj->bi", T_world_camera[:3, :3], bg_local_dirs)
+        bg_points = (T_world_camera[:, -1] + bg_dirs * depth[~mask, None]).astype(np.float32)
+        bg_point_colors = rgb[~mask]
 
-        return points, point_colors
+        return points, point_colors, bg_points, bg_point_colors

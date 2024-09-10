@@ -16,8 +16,8 @@ import viser.transforms as tf
 
 
 def main(
-    data_path: Path = Path(__file__).parent / "record3d_dance",
-    downsample_factor: int = 4,
+    data_path: Path = Path("/ssd2/junyi/dust3r/checkpoints/eval_sintel_monocular_depth_3datasets_3_7_epoch32_tmp0.01_swinstride5_flow0.01_0.2_35_gt_mask_iter300_fullseq/0/sleeping_2"),
+    downsample_factor: int = 1,
     max_frames: int = 100,
     share: bool = False,
 ) -> None:
@@ -91,9 +91,14 @@ def main(
         show_axes=False,
     )
     frame_nodes: list[viser.FrameHandle] = []
-    for i in tqdm(range(num_frames)):
+    bg_positions = []
+    bg_colors = []
+    for i in tqdm(range(num_frames)): # remove last frame since there's no gt mask
         frame = loader.get_frame(i)
-        position, color = frame.get_point_cloud(downsample_factor)
+        position, color, bg_position, bg_color = frame.get_point_cloud(downsample_factor)
+
+        bg_positions.append(bg_position)
+        bg_colors.append(bg_color)
 
         # Add base frame.
         frame_nodes.append(server.scene.add_frame(f"/frames/t{i}", show_axes=False))
@@ -103,7 +108,7 @@ def main(
             name=f"/frames/t{i}/point_cloud",
             points=position,
             colors=color,
-            point_size=0.01,
+            point_size=0.001,
             point_shape="rounded",
         )
 
@@ -114,7 +119,7 @@ def main(
             f"/frames/t{i}/frustum",
             fov=fov,
             aspect=aspect,
-            scale=0.15,
+            scale=0.05,
             image=frame.rgb[::downsample_factor, ::downsample_factor],
             wxyz=tf.SO3.from_matrix(frame.T_world_camera[:3, :3]).wxyz,
             position=frame.T_world_camera[:3, 3],
@@ -130,6 +135,17 @@ def main(
     # Hide all but the current frame.
     for i, frame_node in enumerate(frame_nodes):
         frame_node.visible = i == gui_timestep.value
+
+    # add background frame
+    bg_positions = onp.concatenate(bg_positions, axis=0)
+    bg_colors = onp.concatenate(bg_colors, axis=0)
+    server.scene.add_point_cloud(
+        name=f"/frames/background",
+        points=bg_positions,
+        colors=bg_colors,
+        point_size=0.001,
+        point_shape="rounded",
+    )
 
     # Playback update loop.
     prev_timestep = gui_timestep.value
