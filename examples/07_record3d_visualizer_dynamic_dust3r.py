@@ -21,6 +21,7 @@ def main(
     downsample_factor: int = 1,
     max_frames: int = 100,
     share: bool = False,
+    conf_threshold: float = 1.1,
 ) -> None:
     server = viser.ViserServer()
     if share:
@@ -29,7 +30,7 @@ def main(
     server.scene.set_up_direction('-z')
 
     print("Loading frames!")
-    loader = viser.extras.Record3dLoader_Customized(data_path)
+    loader = viser.extras.Record3dLoader_Customized(data_path, conf_threshold=conf_threshold)
     num_frames = min(max_frames, loader.num_frames())
 
     # Add playback UI.
@@ -165,4 +166,8 @@ if __name__ == "__main__":
         data_path = Path(sys.argv[1])
     except IndexError:
         data_path = Path("/ssd2/junyi/dust3r/checkpoints/eval_sintel_monocular_depth_3datasets_3_7_epoch32_tmp0.01_swinstride5_flow0.01_0.2_35_gt_mask_iter300_fullseq/0/alley_2")
-    tyro.cli(main(data_path=data_path))
+    try:
+        conf_threshold = float(sys.argv[2])
+    except IndexError:
+        conf_threshold = 1.0
+    tyro.cli(main(data_path=data_path, conf_threshold=conf_threshold))
