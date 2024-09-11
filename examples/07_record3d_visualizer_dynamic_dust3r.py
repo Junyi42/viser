@@ -24,6 +24,8 @@ def main(
     share: bool = False,
     conf_threshold: float = 1.0,
     foreground_conf_threshold: float = 0.1,
+    point_size: float = 0.001,
+    camera_frustum_scale: float = 0.02,
 ) -> None:
     server = viser.ViserServer()
     if share:
@@ -114,7 +116,7 @@ def main(
             name=f"/frames/t{i}/point_cloud",
             points=position,
             colors=color,
-            point_size=0.001,
+            point_size=point_size,
             point_shape="rounded",
         )
 
@@ -125,7 +127,7 @@ def main(
             f"/frames/t{i}/frustum",
             fov=fov,
             aspect=aspect,
-            scale=0.02,
+            scale=camera_frustum_scale,
             image=frame.rgb[::downsample_factor, ::downsample_factor],
             wxyz=tf.SO3.from_matrix(frame.T_world_camera[:3, :3]).wxyz,
             position=frame.T_world_camera[:3, 3],
@@ -134,8 +136,8 @@ def main(
         # Add some axes.
         server.scene.add_frame(
             f"/frames/t{i}/frustum/axes",
-            axes_length=0.05,
-            axes_radius=0.005,
+            axes_length=camera_frustum_scale*2.5,
+            axes_radius=camera_frustum_scale/4,
         )
 
     # Hide all but the current frame.
@@ -149,7 +151,7 @@ def main(
         name=f"/frames/background",
         points=bg_positions,
         colors=bg_colors,
-        point_size=0.001,
+        point_size=point_size,
         point_shape="rounded",
     )
 
@@ -186,9 +188,26 @@ if __name__ == "__main__":
         default=0.1, 
         help="Foreground confidence threshold, default is 0.1"
     )
+    parser.add_argument(
+        "--point_size", 
+        type=float, 
+        default=0.001, 
+        help="Point size, default is 0.001"
+    )
+    parser.add_argument(
+        "--camera_size",
+        type=float,
+        default=0.02,
+        help="Camera frustum scale, default is 0.02"
+    )
 
     # Parse arguments
     args = parser.parse_args()
 
     # Call the main function with the parsed arguments
-    tyro.cli(main(data_path=args.data_path, conf_threshold=args.conf_thre, foreground_conf_threshold=args.fg_conf_thre))
+    tyro.cli(main(
+        data_path=args.data_path, 
+        conf_threshold=args.conf_thre, 
+        foreground_conf_threshold=args.fg_conf_thre,
+        point_size=args.point_size,
+        camera_frustum_scale=args.camera_size,))
