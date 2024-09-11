@@ -20,7 +20,7 @@ class Record3dLoader_Customized:
     # NOTE(hangg): Consider moving this module into
     # `examples/7_record3d_visualizer.py` since it is usecase-specific.
 
-    def __init__(self, data_dir: Path, conf_threshold: float = 1.0, foreground_conf_threshold: float = 0.1):
+    def __init__(self, data_dir: Path, conf_threshold: float = 1.0, foreground_conf_threshold: float = 0.1, no_mask: bool = False):
 
         # Read metadata.
         intrinsics_path = data_dir / "pred_intrinsics.txt"
@@ -45,6 +45,8 @@ class Record3dLoader_Customized:
         self.fps = fps
         self.conf_threshold = conf_threshold
         self.foreground_conf_threshold = foreground_conf_threshold
+        self.no_mask = no_mask
+
         self.K = K
         self.T_world_cameras = T_world_cameras
 
@@ -74,6 +76,8 @@ class Record3dLoader_Customized:
         # Read mask.
         mask = iio.imread(self.mask_paths[index]) > 0
         mask: onpt.NDArray[onp.bool_] = mask
+        if self.no_mask:
+            mask = np.ones_like(mask).astype(np.bool_)
 
         # Read RGB.
         rgb = iio.imread(self.rgb_paths[index])

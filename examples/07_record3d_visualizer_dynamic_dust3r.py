@@ -2,7 +2,8 @@
 
 Parse and stream record3d captures. To get the demo data, see `./assets/download_record3d_dance.sh`.
 """
-
+# for davis dataset:
+# python viser/examples/07_record3d_visualizer_dynamic_dust3r.py --fg_conf_thre 0. --conf_thre 0.001 --point_size 5e-4 --data checkpoints/eval_sintel_4datasets_3_7_epoch20_tmp0.01_swinstride5_flow0.015_0.2_25_gt_mask_iter300_fullseq_davis/0/breakdance-flare
 import time
 import sys
 import argparse
@@ -26,6 +27,7 @@ def main(
     foreground_conf_threshold: float = 0.1,
     point_size: float = 0.001,
     camera_frustum_scale: float = 0.02,
+    no_mask: bool = False,
 ) -> None:
     server = viser.ViserServer()
     if share:
@@ -34,7 +36,11 @@ def main(
     server.scene.set_up_direction('-z')
 
     print("Loading frames!")
-    loader = viser.extras.Record3dLoader_Customized(data_path, conf_threshold=conf_threshold, foreground_conf_threshold=foreground_conf_threshold)
+    loader = viser.extras.Record3dLoader_Customized(data_path, 
+                                                    conf_threshold=conf_threshold, 
+                                                    foreground_conf_threshold=foreground_conf_threshold,
+                                                    no_mask=no_mask,
+                                                    )
     num_frames = min(max_frames, loader.num_frames())
 
     # Add playback UI.
@@ -170,7 +176,7 @@ if __name__ == "__main__":
 
     # Define arguments
     parser.add_argument(
-        "--data_path", 
+        "--data", 
         type=Path, 
         nargs="?", 
         default=Path("/ssd2/junyi/dust3r/checkpoints/eval_sintel_monocular_depth_3datasets_3_7_epoch32_tmp0.01_swinstride5_flow0.01_0.2_35_gt_mask_iter300_fullseq/0/alley_2"),
@@ -200,14 +206,21 @@ if __name__ == "__main__":
         default=0.02,
         help="Camera frustum scale, default is 0.02"
     )
+    parser.add_argument(
+        "--no_mask",
+        action="store_true",
+        help="Don't use mask to filter out points",
+    )
 
     # Parse arguments
     args = parser.parse_args()
 
     # Call the main function with the parsed arguments
     tyro.cli(main(
-        data_path=args.data_path, 
+        data_path=args.data, 
         conf_threshold=args.conf_thre, 
         foreground_conf_threshold=args.fg_conf_thre,
         point_size=args.point_size,
-        camera_frustum_scale=args.camera_size,))
+        camera_frustum_scale=args.camera_size,
+        no_mask=args.no_mask,
+        ))
