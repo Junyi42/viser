@@ -5,6 +5,7 @@ Parse and stream record3d captures. To get the demo data, see `./assets/download
 
 import time
 import sys
+import argparse
 from pathlib import Path
 
 import numpy as onp
@@ -21,7 +22,8 @@ def main(
     downsample_factor: int = 1,
     max_frames: int = 100,
     share: bool = False,
-    conf_threshold: float = 1.1,
+    conf_threshold: float = 1.0,
+    foreground_conf_threshold: float = 0.1,
 ) -> None:
     server = viser.ViserServer()
     if share:
@@ -30,7 +32,7 @@ def main(
     server.scene.set_up_direction('-z')
 
     print("Loading frames!")
-    loader = viser.extras.Record3dLoader_Customized(data_path, conf_threshold=conf_threshold)
+    loader = viser.extras.Record3dLoader_Customized(data_path, conf_threshold=conf_threshold, foreground_conf_threshold=foreground_conf_threshold)
     num_frames = min(max_frames, loader.num_frames())
 
     # Add playback UI.
@@ -161,13 +163,32 @@ def main(
 
 
 if __name__ == "__main__":
-    # get the path to the data with first argument of the command
-    try:
-        data_path = Path(sys.argv[1])
-    except IndexError:
-        data_path = Path("/ssd2/junyi/dust3r/checkpoints/eval_sintel_monocular_depth_3datasets_3_7_epoch32_tmp0.01_swinstride5_flow0.01_0.2_35_gt_mask_iter300_fullseq/0/alley_2")
-    try:
-        conf_threshold = float(sys.argv[2])
-    except IndexError:
-        conf_threshold = 1.0
-    tyro.cli(main(data_path=data_path, conf_threshold=conf_threshold))
+    # Initialize parser
+    parser = argparse.ArgumentParser(description="Process input arguments.")
+
+    # Define arguments
+    parser.add_argument(
+        "--data_path", 
+        type=Path, 
+        nargs="?", 
+        default=Path("/ssd2/junyi/dust3r/checkpoints/eval_sintel_monocular_depth_3datasets_3_7_epoch32_tmp0.01_swinstride5_flow0.01_0.2_35_gt_mask_iter300_fullseq/0/alley_2"),
+        help="Path to the data"
+    )
+    parser.add_argument(
+        "--conf_thre", 
+        type=float, 
+        default=1.0, 
+        help="Confidence threshold, default is 1.0"
+    )
+    parser.add_argument(
+        "--fg_conf_thre", 
+        type=float, 
+        default=0.1, 
+        help="Foreground confidence threshold, default is 0.1"
+    )
+
+    # Parse arguments
+    args = parser.parse_args()
+
+    # Call the main function with the parsed arguments
+    tyro.cli(main(data_path=args.data_path, conf_threshold=args.conf_thre, foreground_conf_threshold=args.fg_conf_thre))
