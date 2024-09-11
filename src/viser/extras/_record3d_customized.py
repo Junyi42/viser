@@ -20,7 +20,7 @@ class Record3dLoader_Customized:
     # NOTE(hangg): Consider moving this module into
     # `examples/7_record3d_visualizer.py` since it is usecase-specific.
 
-    def __init__(self, data_dir: Path):
+    def __init__(self, data_dir: Path, conf_threshold: float = 1.0, foreground_conf_threshold: float = 0.1):
 
         # Read metadata.
         intrinsics_path = data_dir / "pred_intrinsics.txt"
@@ -43,6 +43,8 @@ class Record3dLoader_Customized:
         T_world_cameras = (T_world_cameras @ np.diag([1, 1, 1, 1])).astype(np.float32)
 
         self.fps = fps
+        self.conf_threshold = conf_threshold
+        self.foreground_conf_threshold = foreground_conf_threshold
         self.K = K
         self.T_world_cameras = T_world_cameras
 
@@ -50,7 +52,7 @@ class Record3dLoader_Customized:
         self.rgb_paths = sorted(data_dir.glob("frame_*.png"), key=lambda p: int(p.stem.split("_")[-1]))
         self.depth_paths = sorted(data_dir.glob("frame_*.npy"), key=lambda p: int(p.stem.split("_")[-1]))
         self.conf_paths = sorted(data_dir.glob("conf_*.npy"), key=lambda p: int(p.stem.split("_")[-1]))
-        self.mask_paths = sorted(data_dir.glob("dynamic_mask_*.png"), key=lambda p: int(p.stem.split("_")[-1]))
+        self.mask_paths = sorted(data_dir.glob("enlarged_dynamic_mask_*.png"), key=lambda p: int(p.stem.split("_")[-1]))
 
         # remove the last frame since it does not have gt dynamic mask
         self.rgb_paths = self.rgb_paths[:-1]
@@ -62,6 +64,8 @@ class Record3dLoader_Customized:
         # Read conf.
         conf = np.load(self.conf_paths[index])
         conf: onpt.NDArray[onp.float32] = conf
+        # clip conf to 0
+        conf = np.clip(conf, 0.0001, 99999)
 
         # Read depth.
         depth = np.load(self.depth_paths[index])
@@ -80,6 +84,8 @@ class Record3dLoader_Customized:
             mask=mask,
             conf=conf,
             T_world_camera=self.T_world_cameras[index],
+            conf_threshold=self.conf_threshold,
+            foreground_conf_threshold=self.foreground_conf_threshold,
         )
 
 
@@ -93,6 +99,8 @@ class Record3dFrame:
     mask: onpt.NDArray[onp.bool_]
     conf: onpt.NDArray[onp.float32]
     T_world_camera: onpt.NDArray[onp.float32]
+    conf_threshold: float = 1.0
+    foreground_conf_threshold: float = 0.1
 
     def get_point_cloud(
         self, downsample_factor: int = 1
@@ -114,17 +122,19 @@ class Record3dFrame:
             np.stack(np.meshgrid(np.arange(img_wh[0]), np.arange(img_wh[1])), 2) + 0.5
         )
         grid = grid * downsample_factor
+        conf_mask = self.conf > self.conf_threshold
+        fg_conf_mask = self.conf > self.foreground_conf_threshold
 
-        homo_grid = np.pad(grid[mask], np.array([[0, 0], [0, 1]]), constant_values=1)
+        homo_grid = np.pad(grid[fg_conf_mask * mask], np.array([[0, 0], [0, 1]]), constant_values=1)
         local_dirs = np.einsum("ij,bj->bi", np.linalg.inv(K), homo_grid)
         dirs = np.einsum("ij,bj->bi", T_world_camera[:3, :3], local_dirs)
-        points = (T_world_camera[:, -1] + dirs * depth[mask, None]).astype(np.float32)
-        point_colors = rgb[mask]
+        points = (T_world_camera[:, -1] + dirs * depth[fg_conf_mask * mask, None]).astype(np.float32)
+        point_colors = rgb[fg_conf_mask * mask]
         
-        bg_homo_grid = np.pad(grid[~mask], np.array([[0, 0], [0, 1]]), constant_values=1)
+        bg_homo_grid = np.pad(grid[conf_mask * ~mask], np.array([[0, 0], [0, 1]]), constant_values=1)
         bg_local_dirs = np.einsum("ij,bj->bi", np.linalg.inv(K), bg_homo_grid)
         bg_dirs = np.einsum("ij,bj->bi", T_world_camera[:3, :3], bg_local_dirs)
-        bg_points = (T_world_camera[:, -1] + bg_dirs * depth[~mask, None]).astype(np.float32)
-        bg_point_colors = rgb[~mask]
+        bg_points = (T_world_camera[:, -1] + bg_dirs * depth[conf_mask * ~mask, None]).astype(np.float32)
+        bg_point_colors = rgb[conf_mask * ~mask]
 
         return points, point_colors, bg_points, bg_point_colors
