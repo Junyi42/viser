@@ -20,7 +20,7 @@ class Record3dLoader_Customized:
     # NOTE(hangg): Consider moving this module into
     # `examples/7_record3d_visualizer.py` since it is usecase-specific.
 
-    def __init__(self, data_dir: Path, conf_threshold: float = 1.0, foreground_conf_threshold: float = 0.1, no_mask: bool = False):
+    def __init__(self, data_dir: Path, conf_threshold: float = 1.0, foreground_conf_threshold: float = 0.1, no_mask: bool = False, xyzw=True):
 
         # Read metadata.
         intrinsics_path = data_dir / "pred_intrinsics.txt"
@@ -35,7 +35,7 @@ class Record3dLoader_Customized:
         T_world_cameras = np.concatenate(
             [   # convert tum pose to se3 pose
                 # Rotation.from_quat(np.concatenate([T_world_cameras[:, 5:], T_world_cameras[:,4:5]], -1)).as_matrix(),
-                Rotation.from_quat(T_world_cameras[:, 4:]).as_matrix(),
+                Rotation.from_quat(T_world_cameras[:, 4:]).as_matrix() if not xyzw else Rotation.from_quat(np.concatenate([T_world_cameras[:, 5:], T_world_cameras[:,4:5]], -1)).as_matrix(),
                 T_world_cameras[:, 1:4, None],
             ],
             -1,

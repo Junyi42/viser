@@ -28,6 +28,7 @@ def main(
     point_size: float = 0.001,
     camera_frustum_scale: float = 0.02,
     no_mask: bool = False,
+    xyzw: bool = True,
 ) -> None:
     server = viser.ViserServer()
     if share:
@@ -40,6 +41,7 @@ def main(
                                                     conf_threshold=conf_threshold, 
                                                     foreground_conf_threshold=foreground_conf_threshold,
                                                     no_mask=no_mask,
+                                                    xyzw=xyzw,
                                                     )
     num_frames = min(max_frames, loader.num_frames())
 
@@ -211,6 +213,11 @@ if __name__ == "__main__":
         action="store_true",
         help="Don't use mask to filter out points",
     )
+    parser.add_argument(
+        "--wxyz",
+        action="store_true",
+        help="Use wxyz for SO3 representation",
+    )
 
     # Parse arguments
     args = parser.parse_args()
@@ -223,4 +230,5 @@ if __name__ == "__main__":
         point_size=args.point_size,
         camera_frustum_scale=args.camera_size,
         no_mask=args.no_mask,
+        xyzw=not args.wxyz,
         ))
