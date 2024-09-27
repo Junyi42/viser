@@ -64,6 +64,7 @@ def main(
         gui_framerate_options = server.gui.add_button_group(
             "FPS options", ("10", "20", "30", "60")
         )
+        gui_show_all_frames = server.gui.add_checkbox("Show all frames", False)
 
     # Frame step buttons.
     @gui_next_frame.on_click
@@ -77,27 +78,46 @@ def main(
     # Disable frame controls when we're playing.
     @gui_playing.on_update
     def _(_) -> None:
-        gui_timestep.disabled = gui_playing.value
-        gui_next_frame.disabled = gui_playing.value
-        gui_prev_frame.disabled = gui_playing.value
-
-    # Set the framerate when we click one of the options.
-    @gui_framerate_options.on_click
-    def _(_) -> None:
-        gui_framerate.value = int(gui_framerate_options.value)
-
-    prev_timestep = gui_timestep.value
+        gui_timestep.disabled = gui_playing.value or gui_show_all_frames.value
+        gui_next_frame.disabled = gui_playing.value or gui_show_all_frames.value
+        gui_prev_frame.disabled = gui_playing.value or gui_show_all_frames.value
 
     # Toggle frame visibility when the timestep slider changes.
     @gui_timestep.on_update
     def _(_) -> None:
         nonlocal prev_timestep
         current_timestep = gui_timestep.value
-        with server.atomic():
-            frame_nodes[current_timestep].visible = True
-            frame_nodes[prev_timestep].visible = False
+        if not gui_show_all_frames.value:
+            with server.atomic():
+                frame_nodes[current_timestep].visible = True
+                frame_nodes[prev_timestep].visible = False
         prev_timestep = current_timestep
         server.flush()  # Optional!
+
+    # Show or hide all frames based on the checkbox.
+    @gui_show_all_frames.on_update
+    def _(_) -> None:
+        if gui_show_all_frames.value:
+            # Show all frames
+            with server.atomic():
+                for frame_node in frame_nodes:
+                    frame_node.visible = True
+            # Disable playback controls
+            gui_playing.disabled = True
+            gui_timestep.disabled = True
+            gui_next_frame.disabled = True
+            gui_prev_frame.disabled = True
+        else:
+            # Show only the current frame
+            current_timestep = gui_timestep.value
+            with server.atomic():
+                for i, frame_node in enumerate(frame_nodes):
+                    frame_node.visible = i == current_timestep
+            # Re-enable playback controls
+            gui_playing.disabled = False
+            gui_timestep.disabled = gui_playing.value
+            gui_next_frame.disabled = gui_playing.value
+            gui_prev_frame.disabled = gui_playing.value
 
     # Load in frames.
     server.scene.add_frame(
@@ -150,7 +170,7 @@ def main(
 
     # Hide all but the current frame.
     for i, frame_node in enumerate(frame_nodes):
-        frame_node.visible = i == gui_timestep.value
+        frame_node.visible = i == gui_timestep.value if not gui_show_all_frames.value else True
 
     # add background frame
     bg_positions = onp.concatenate(bg_positions, axis=0)
@@ -187,13 +207,13 @@ if __name__ == "__main__":
     parser.add_argument(
         "--conf_thre", 
         type=float, 
-        default=1.0, 
+        default=0.1, 
         help="Confidence threshold, default is 1.0"
     )
     parser.add_argument(
         "--fg_conf_thre", 
         type=float, 
-        default=0.1, 
+        default=0.0, 
         help="Foreground confidence threshold, default is 0.1"
     )
     parser.add_argument(
