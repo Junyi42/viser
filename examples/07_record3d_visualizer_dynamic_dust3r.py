@@ -29,6 +29,7 @@ def main(
     camera_frustum_scale: float = 0.02,
     no_mask: bool = False,
     xyzw: bool = True,
+    axes_scale: float = 0.25,
 ) -> None:
     server = viser.ViserServer()
     if share:
@@ -65,6 +66,13 @@ def main(
             "FPS options", ("10", "20", "30", "60")
         )
         gui_show_all_frames = server.gui.add_checkbox("Show all frames", False)
+        gui_stride = server.gui.add_slider(
+            "Stride",
+            min=1,
+            max=num_frames,
+            step=1,
+            initial_value=1,
+        )
 
     # Frame step buttons.
     @gui_next_frame.on_click
@@ -97,11 +105,13 @@ def main(
     # Show or hide all frames based on the checkbox.
     @gui_show_all_frames.on_update
     def _(_) -> None:
+        gui_stride.disabled = not gui_show_all_frames.value  # Enable/disable stride slider
         if gui_show_all_frames.value:
-            # Show all frames
+            # Show frames with stride
+            stride = gui_stride.value
             with server.atomic():
-                for frame_node in frame_nodes:
-                    frame_node.visible = True
+                for i, frame_node in enumerate(frame_nodes):
+                    frame_node.visible = (i % stride == 0)
             # Disable playback controls
             gui_playing.disabled = True
             gui_timestep.disabled = True
@@ -118,6 +128,16 @@ def main(
             gui_timestep.disabled = gui_playing.value
             gui_next_frame.disabled = gui_playing.value
             gui_prev_frame.disabled = gui_playing.value
+
+    # Update frame visibility when the stride changes.
+    @gui_stride.on_update
+    def _(_) -> None:
+        if gui_show_all_frames.value:
+            # Update frame visibility based on new stride
+            stride = gui_stride.value
+            with server.atomic():
+                for i, frame_node in enumerate(frame_nodes):
+                    frame_node.visible = (i % stride == 0)
 
     # Load in frames.
     server.scene.add_frame(
@@ -164,13 +184,17 @@ def main(
         # Add some axes.
         server.scene.add_frame(
             f"/frames/t{i}/frustum/axes",
-            axes_length=camera_frustum_scale*2.5,
-            axes_radius=camera_frustum_scale/4,
+            axes_length=camera_frustum_scale*axes_scale*10,
+            axes_radius=camera_frustum_scale*axes_scale,
         )
 
     # Hide all but the current frame.
+    # Initialize frame visibility.
     for i, frame_node in enumerate(frame_nodes):
-        frame_node.visible = i == gui_timestep.value if not gui_show_all_frames.value else True
+        if gui_show_all_frames.value:
+            frame_node.visible = (i % gui_stride.value == 0)
+        else:
+            frame_node.visible = i == gui_timestep.value
 
     # add background frame
     bg_positions = onp.concatenate(bg_positions, axis=0)
@@ -238,6 +262,12 @@ if __name__ == "__main__":
         action="store_true",
         help="Use wxyz for SO3 representation",
     )
+    parser.add_argument(
+        "--axes_scale",
+        type=float,
+        default=0.1,
+        help="Scale of axes",
+    )
 
     # Parse arguments
     args = parser.parse_args()
@@ -251,4 +281,5 @@ if __name__ == "__main__":
         camera_frustum_scale=args.camera_size,
         no_mask=args.no_mask,
         xyzw=not args.wxyz,
+        axes_scale=args.axes_scale,
         ))
