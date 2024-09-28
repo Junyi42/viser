@@ -297,8 +297,8 @@ function ViewerCanvas({ children }: { children: React.ReactNode }) {
       shadows
       camera={{
         position: [
-          -0.3 * initDistanceScale,
-          0.3 * initDistanceScale,
+          0,// -0.3 * initDistanceScale,
+          0,// 0.3 * initDistanceScale,
           -0.3 * initDistanceScale,
         ],
         near: 0.05,

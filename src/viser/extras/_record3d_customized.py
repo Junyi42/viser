@@ -40,6 +40,11 @@ class Record3dLoader_Customized:
         )
         self.T_world_cameras = self.T_world_cameras.astype(np.float32)
 
+        # Convert to homogeneous transformation matrices (ensure shape is (N, 4, 4))
+        num_frames = self.T_world_cameras.shape[0]
+        ones = np.tile(np.array([0, 0, 0, 1], dtype=np.float32), (num_frames, 1, 1))
+        self.T_world_cameras = np.concatenate([self.T_world_cameras, ones], axis=1)
+
         self.fps = fps
         self.conf_threshold = conf_threshold
         self.foreground_conf_threshold = foreground_conf_threshold
@@ -54,13 +59,17 @@ class Record3dLoader_Customized:
         # Remove the last frame since it does not have a ground truth dynamic mask
         self.rgb_paths = self.rgb_paths[:-1]
 
-        # Compute the median point of the first frame's point cloud
-        first_frame = self.get_frame(0)
-        points, _, _, _ = first_frame.get_point_cloud()
-        self.median_point = np.median(points, axis=0)
+        # Align all camera poses by the first frame
+        T0 = self.T_world_cameras[0]  # First camera pose (4x4 matrix)
+        T0_inv = np.linalg.inv(T0)    # Inverse of the first camera pose
 
-        # Centerize the camera poses by subtracting the median point from the positions
-        self.T_world_cameras[:, :3, 3] -= self.median_point
+        # Apply T0_inv to all camera poses
+        self.T_world_cameras = np.matmul(T0_inv[np.newaxis, :, :], self.T_world_cameras)
+
+        # Now, the first camera pose is identity, and others are relative to the first frame
+        # set the origin point to be the translation of camera pose of the middle frame
+        self.T_world_cameras[:, :3, 3] -= self.T_world_cameras[len(self.T_world_cameras) // 2, :3, 3]
+
 
     def num_frames(self) -> int:
         return len(self.rgb_paths)
@@ -85,9 +94,6 @@ class Record3dLoader_Customized:
         # Read RGB.
         rgb = iio.imread(self.rgb_paths[index])
 
-        # Pass median_point if it has been computed; otherwise, pass None
-        median_point = getattr(self, 'median_point', None)
-
         return Record3dFrame(
             K=self.K[index],
             rgb=rgb,
@@ -97,7 +103,6 @@ class Record3dLoader_Customized:
             T_world_camera=self.T_world_cameras[index],
             conf_threshold=self.conf_threshold,
             foreground_conf_threshold=self.foreground_conf_threshold,
-            median_point=median_point,  # Pass median_point or None
         )
 
 
