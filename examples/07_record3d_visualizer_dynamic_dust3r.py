@@ -2,8 +2,7 @@
 
 Parse and stream record3d captures. To get the demo data, see `./assets/download_record3d_dance.sh`.
 """
-# for davis dataset:
-# python viser/examples/07_record3d_visualizer_dynamic_dust3r.py --fg_conf_thre 0. --conf_thre 0.001 --point_size 5e-4 --data checkpoints/eval_sintel_4datasets_3_7_epoch20_tmp0.01_swinstride5_flow0.015_0.2_25_gt_mask_iter300_fullseq_davis/0/breakdance-flare
+
 import time
 import sys
 import argparse
@@ -16,7 +15,7 @@ from tqdm.auto import tqdm
 import viser
 import viser.extras
 import viser.transforms as tf
-import matplotlib.cm as cm  # <-- Added import for colormap
+import matplotlib.cm as cm  # For colormap
 
 def main(
     data_path: Path = Path("/ssd2/junyi/dust3r/checkpoints/eval_sintel_monocular_depth_3datasets_3_7_epoch32_tmp0.01_swinstride5_flow0.01_0.2_35_gt_mask_iter300_fullseq/0/alley_2"),
@@ -31,6 +30,7 @@ def main(
     xyzw: bool = True,
     axes_scale: float = 0.25,
 ) -> None:
+    from pathlib import Path  # <-- Import Path here if not already imported
     server = viser.ViserServer()
     if share:
         server.request_share_url()
@@ -73,7 +73,12 @@ def main(
             max=num_frames,
             step=1,
             initial_value=1,
+            disabled=True,  # Initially disabled
         )
+
+    # Add recording UI.
+    with server.gui.add_folder("Recording"):
+        gui_record_scene = server.gui.add_button("Record Scene")
 
     # Frame step buttons.
     @gui_next_frame.on_click
@@ -140,6 +145,42 @@ def main(
                 for i, frame_node in enumerate(frame_nodes):
                     frame_node.visible = (i % stride == 0)
 
+    # Recording handler
+    @gui_record_scene.on_click
+    def _(_):
+        gui_record_scene.disabled = True
+        rec = server._start_scene_recording()
+        rec.set_loop_start()
+        
+        # Determine sleep duration based on current FPS
+        sleep_duration = 1.0 / gui_framerate.value if gui_framerate.value > 0 else 0.033  # Default to ~30 FPS
+        
+        if gui_show_all_frames.value:
+            # Record all frames according to the stride
+            stride = gui_stride.value
+            frames_to_record = [i for i in range(num_frames) if i % stride == 0]
+        else:
+            # Record the frames in sequence
+            frames_to_record = range(num_frames)
+        
+        for t in frames_to_record:
+            # Update the scene to show frame t
+            with server.atomic():
+                for i, frame_node in enumerate(frame_nodes):
+                    frame_node.visible = (i == t) if not gui_show_all_frames.value else (i % gui_stride.value == 0)
+            server.flush()
+            rec.insert_sleep(sleep_duration)
+        
+        # Finish recording
+        bs = rec.end_and_serialize()
+        
+        # Save the recording to a file
+        output_path = Path("./recording.viser")
+        output_path.write_bytes(bs)
+        print(f"Recording saved to {output_path.resolve()}")
+        
+        gui_record_scene.disabled = False
+
     # Load in frames.
     server.scene.add_frame(
         "/frames",
@@ -185,8 +226,7 @@ def main(
             image=frame.rgb[::downsample_factor, ::downsample_factor],
             wxyz=tf.SO3.from_matrix(frame.T_world_camera[:3, :3]).wxyz,
             position=frame.T_world_camera[:3, 3],
-            color=color_rgb,  # <-- Pass the color here
-            thickness=1.5,
+            color=color_rgb,  # Set the color for the frustum
         )
 
         # Add some axes.
