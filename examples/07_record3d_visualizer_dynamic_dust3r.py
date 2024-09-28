@@ -16,7 +16,7 @@ from tqdm.auto import tqdm
 import viser
 import viser.extras
 import viser.transforms as tf
-
+import matplotlib.cm as cm  # <-- Added import for colormap
 
 def main(
     data_path: Path = Path("/ssd2/junyi/dust3r/checkpoints/eval_sintel_monocular_depth_3datasets_3_7_epoch32_tmp0.01_swinstride5_flow0.01_0.2_35_gt_mask_iter300_fullseq/0/alley_2"),
@@ -38,12 +38,13 @@ def main(
     server.scene.set_up_direction('-z')
 
     print("Loading frames!")
-    loader = viser.extras.Record3dLoader_Customized(data_path, 
-                                                    conf_threshold=conf_threshold, 
-                                                    foreground_conf_threshold=foreground_conf_threshold,
-                                                    no_mask=no_mask,
-                                                    xyzw=xyzw,
-                                                    )
+    loader = viser.extras.Record3dLoader_Customized(
+        data_path,
+        conf_threshold=conf_threshold,
+        foreground_conf_threshold=foreground_conf_threshold,
+        no_mask=no_mask,
+        xyzw=xyzw,
+    )
     num_frames = min(max_frames, loader.num_frames())
 
     # Add playback UI.
@@ -149,7 +150,7 @@ def main(
     frame_nodes: list[viser.FrameHandle] = []
     bg_positions = []
     bg_colors = []
-    for i in tqdm(range(num_frames)): # remove last frame since there's no gt mask
+    for i in tqdm(range(num_frames)):
         frame = loader.get_frame(i)
         position, color, bg_position, bg_color = frame.get_point_cloud(downsample_factor)
 
@@ -168,7 +169,12 @@ def main(
             point_shape="rounded",
         )
 
-        # Place the frustum.
+        # Compute color for frustum based on frame index.
+        norm_i = i / (num_frames - 1) if num_frames > 1 else 0  # Normalize index to [0, 1]
+        color_rgba = cm.viridis(norm_i)  # Get RGBA color from colormap
+        color_rgb = color_rgba[:3]  # Use RGB components
+
+        # Place the frustum with the computed color.
         fov = 2 * onp.arctan2(frame.rgb.shape[0] / 2, frame.K[0, 0])
         aspect = frame.rgb.shape[1] / frame.rgb.shape[0]
         server.scene.add_camera_frustum(
@@ -179,16 +185,17 @@ def main(
             image=frame.rgb[::downsample_factor, ::downsample_factor],
             wxyz=tf.SO3.from_matrix(frame.T_world_camera[:3, :3]).wxyz,
             position=frame.T_world_camera[:3, 3],
+            color=color_rgb,  # <-- Pass the color here
+            thickness=1.5,
         )
 
         # Add some axes.
         server.scene.add_frame(
             f"/frames/t{i}/frustum/axes",
-            axes_length=camera_frustum_scale*axes_scale*10,
-            axes_radius=camera_frustum_scale*axes_scale,
+            axes_length=camera_frustum_scale * axes_scale * 10,
+            axes_radius=camera_frustum_scale * axes_scale,
         )
 
-    # Hide all but the current frame.
     # Initialize frame visibility.
     for i, frame_node in enumerate(frame_nodes):
         if gui_show_all_frames.value:
@@ -196,7 +203,7 @@ def main(
         else:
             frame_node.visible = i == gui_timestep.value
 
-    # add background frame
+    # Add background frame.
     bg_positions = onp.concatenate(bg_positions, axis=0)
     bg_colors = onp.concatenate(bg_colors, axis=0)
     server.scene.add_point_cloud(
@@ -210,9 +217,8 @@ def main(
     # Playback update loop.
     prev_timestep = gui_timestep.value
     while True:
-        if gui_playing.value:
+        if gui_playing.value and not gui_show_all_frames.value:
             gui_timestep.value = (gui_timestep.value + 1) % num_frames
-
         time.sleep(1.0 / gui_framerate.value)
 
 
@@ -222,34 +228,34 @@ if __name__ == "__main__":
 
     # Define arguments
     parser.add_argument(
-        "--data", 
-        type=Path, 
-        nargs="?", 
+        "--data",
+        type=Path,
+        nargs="?",
         default=Path("/ssd2/junyi/dust3r/checkpoints/eval_sintel_monocular_depth_3datasets_3_7_epoch32_tmp0.01_swinstride5_flow0.01_0.2_35_gt_mask_iter300_fullseq/0/alley_2"),
         help="Path to the data"
     )
     parser.add_argument(
-        "--conf_thre", 
-        type=float, 
-        default=0.1, 
+        "--conf_thre",
+        type=float,
+        default=0.1,
         help="Confidence threshold, default is 1.0"
     )
     parser.add_argument(
-        "--fg_conf_thre", 
-        type=float, 
-        default=0.0, 
+        "--fg_conf_thre",
+        type=float,
+        default=0.0,
         help="Foreground confidence threshold, default is 0.1"
     )
     parser.add_argument(
-        "--point_size", 
-        type=float, 
-        default=0.001, 
+        "--point_size",
+        type=float,
+        default=0.001,
         help="Point size, default is 0.001"
     )
     parser.add_argument(
         "--camera_size",
         type=float,
-        default=0.02,
+        default=0.015,
         help="Camera frustum scale, default is 0.02"
     )
     parser.add_argument(
@@ -274,12 +280,12 @@ if __name__ == "__main__":
 
     # Call the main function with the parsed arguments
     tyro.cli(main(
-        data_path=args.data, 
-        conf_threshold=args.conf_thre, 
+        data_path=args.data,
+        conf_threshold=args.conf_thre,
         foreground_conf_threshold=args.fg_conf_thre,
         point_size=args.point_size,
         camera_frustum_scale=args.camera_size,
         no_mask=args.no_mask,
         xyzw=not args.wxyz,
         axes_scale=args.axes_scale,
-        ))
+    ))

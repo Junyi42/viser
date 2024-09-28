@@ -98,6 +98,7 @@ export interface CameraFrustumMessage {
   aspect: number;
   scale: number;
   color: number;
+  thickness: number;
   image_media_type: "image/jpeg" | "image/png" | null;
   image_binary: Uint8Array | null;
 }

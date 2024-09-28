@@ -594,6 +594,7 @@ function useMessageHandler() {
                 aspect={message.aspect}
                 scale={message.scale}
                 color={message.color}
+                thickness={message.thickness}
                 image={texture}
               />
             ),

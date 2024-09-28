@@ -412,6 +412,7 @@ class SceneApi:
         wxyz: tuple[float, float, float, float] | onp.ndarray = (1.0, 0.0, 0.0, 0.0),
         position: tuple[float, float, float] | onp.ndarray = (0.0, 0.0, 0.0),
         visible: bool = True,
+        thickness: float = 1.0,
     ) -> CameraFrustumHandle:
         """Add a camera frustum to the scene for visualization.
 
@@ -454,6 +455,7 @@ class SceneApi:
                 fov=fov,
                 aspect=aspect,
                 scale=scale,
+                thickness=thickness,
                 # (255, 255, 255) => 0xffffff, etc
                 color=_encode_rgb(color),
                 image_media_type=media_type,

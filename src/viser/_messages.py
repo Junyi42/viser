@@ -172,6 +172,7 @@ class CameraFrustumMessage(Message):
     aspect: float
     scale: float
     color: int
+    thickness: float
     image_media_type: Optional[Literal["image/jpeg", "image/png"]]
     image_binary: Optional[bytes]
 

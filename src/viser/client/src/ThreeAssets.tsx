@@ -405,6 +405,7 @@ export const CameraFrustum = React.forwardRef<
     aspect: number;
     scale: number;
     color: number;
+    thickness?: number; // Added thickness property
     image?: THREE.Texture;
   }
 >(function CameraFrustum(props, ref) {
@@ -417,7 +418,7 @@ export const CameraFrustum = React.forwardRef<
   y /= volumeScale;
   z /= volumeScale;
 
-  function scaledLineSegments(points: [number, number, number][]) {
+  function scaledLineSegments(points: [number, number, number][], thickness = 1.0) {
     points = points.map((xyz) => [xyz[0] * x, xyz[1] * y, xyz[2] * z]);
     return [...Array(points.length - 1).keys()].map((i) => (
       <LineSegmentInstance
@@ -429,9 +430,12 @@ export const CameraFrustum = React.forwardRef<
           .fromArray(points[i + 1])
           .multiplyScalar(props.scale)}
         color={props.color}
+        thickness={thickness} // Pass thickness to LineSegmentInstance
       />
     ));
   }
+
+  const lineThickness = props.thickness || 1.0; // Default to 1.0 if not provided
 
   return (
     <group ref={ref}>
@@ -440,31 +444,43 @@ export const CameraFrustum = React.forwardRef<
         <cylinderGeometry
           args={[props.scale * 0.03, props.scale * 0.03, 1.0, 3]}
         />
-        {scaledLineSegments([
-          // Rectangle.
-          [-1, -1, 1],
-          [1, -1, 1],
-          [1, 1, 1],
-          [-1, 1, 1],
-          [-1, -1, 1],
-        ])}
-        {scaledLineSegments([
-          // Lines to origin.
-          [-1, -1, 1],
-          [0, 0, 0],
-          [1, -1, 1],
-        ])}
-        {scaledLineSegments([
-          // Lines to origin.
-          [-1, 1, 1],
-          [0, 0, 0],
-          [1, 1, 1],
-        ])}
-        {scaledLineSegments([
-          // Up direction.
-          [0.0, -1.2, 1.0],
-          [0.0, -0.9, 1.0],
-        ])}
+        {scaledLineSegments(
+          [
+            // Rectangle.
+            [-1, -1, 1],
+            [1, -1, 1],
+            [1, 1, 1],
+            [-1, 1, 1],
+            [-1, -1, 1],
+          ],
+          lineThickness // Pass thickness to scaledLineSegments
+        )}
+        {scaledLineSegments(
+          [
+            // Lines to origin.
+            [-1, -1, 1],
+            [0, 0, 0],
+            [1, -1, 1],
+          ],
+          lineThickness // Pass thickness to scaledLineSegments
+        )}
+        {scaledLineSegments(
+          [
+            // Lines to origin.
+            [-1, 1, 1],
+            [0, 0, 0],
+            [1, 1, 1],
+          ],
+          lineThickness // Pass thickness to scaledLineSegments
+        )}
+        {scaledLineSegments(
+          [
+            // Up direction.
+            [0.0, -1.2, 1.0],
+            [0.0, -0.9, 1.0],
+          ],
+          lineThickness // Pass thickness to scaledLineSegments
+        )}
       </Instances>
       {props.image && (
         <mesh
@@ -488,10 +504,12 @@ export const CameraFrustum = React.forwardRef<
   );
 });
 
+
 function LineSegmentInstance(props: {
   start: THREE.Vector3;
   end: THREE.Vector3;
   color: number;
+  thickness?: number; // Optional thickness property
 }) {
   const desiredDirection = new THREE.Vector3()
     .subVectors(props.end, props.start)
@@ -507,11 +525,13 @@ function LineSegmentInstance(props: {
     .addVectors(props.start, props.end)
     .divideScalar(2.0);
 
+  const thickness = props.thickness || 1.0; // Default to 1.0 if not provided
+
   return (
     <Instance
       position={midpoint}
       quaternion={orientation}
-      scale={[1.0, length, 1.0]}
+      scale={[thickness, length, thickness]} // Increase thickness in x and z directions
     >
       <OutlinesIfHovered creaseAngle={0.0} />
     </Instance>
