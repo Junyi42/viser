@@ -60,15 +60,11 @@ class Record3dLoader_Customized:
         self.rgb_paths = self.rgb_paths[:-1]
 
         # Align all camera poses by the first frame
-        T0 = self.T_world_cameras[0]  # First camera pose (4x4 matrix)
+        T0 = self.T_world_cameras[len(self.T_world_cameras) // 2]  # First camera pose (4x4 matrix)
         T0_inv = np.linalg.inv(T0)    # Inverse of the first camera pose
 
         # Apply T0_inv to all camera poses
         self.T_world_cameras = np.matmul(T0_inv[np.newaxis, :, :], self.T_world_cameras)
-
-        # Now, the first camera pose is identity, and others are relative to the first frame
-        # set the origin point to be the translation of camera pose of the middle frame
-        self.T_world_cameras[:, :3, 3] -= self.T_world_cameras[len(self.T_world_cameras) // 2, :3, 3]
 
 
     def num_frames(self) -> int:
@@ -118,10 +114,9 @@ class Record3dFrame:
     T_world_camera: onpt.NDArray[onp.float32]
     conf_threshold: float = 1.0
     foreground_conf_threshold: float = 0.1
-    median_point: onpt.NDArray[onp.float32] = None  # Add median_point field
 
     def get_point_cloud(
-        self, downsample_factor: int = 1
+        self, downsample_factor: int = 1, bg_downsample_factor: int = 1,
     ) -> Tuple[onpt.NDArray[onp.float32], onpt.NDArray[onp.uint8], onpt.NDArray[onp.float32], onpt.NDArray[onp.uint8]]:
         rgb = self.rgb[::downsample_factor, ::downsample_factor]
         depth = skimage.transform.resize(self.depth, rgb.shape[:2], order=0)
@@ -142,6 +137,9 @@ class Record3dFrame:
         grid = grid * downsample_factor
         conf_mask = self.conf > self.conf_threshold
         fg_conf_mask = self.conf > self.foreground_conf_threshold
+        # reshape the conf mask to the shape of the depth
+        conf_mask = skimage.transform.resize(conf_mask, depth.shape, order=0)
+        fg_conf_mask = skimage.transform.resize(fg_conf_mask, depth.shape, order=0)
 
         # Foreground points
         homo_grid = np.pad(grid[fg_conf_mask & mask], ((0, 0), (0, 1)), constant_values=1)
@@ -157,9 +155,13 @@ class Record3dFrame:
         bg_points = (T_world_camera[:3, 3] + bg_dirs * depth[conf_mask & ~mask, None]).astype(np.float32)
         bg_point_colors = rgb[conf_mask & ~mask]
 
-        # Centerize the points by subtracting the median point
-        # if self.median_point is not None:
-        #     points -= self.median_point
-        #     bg_points -= self.median_point
+        if bg_downsample_factor > 1 and bg_points.shape[0] > 0:
+            indices = np.random.choice(
+                bg_points.shape[0],
+                size=bg_points.shape[0] // bg_downsample_factor,
+                replace=False
+            )
+            bg_points = bg_points[indices]
+            bg_point_colors = bg_point_colors[indices]
 
         return points, point_colors, bg_points, bg_point_colors

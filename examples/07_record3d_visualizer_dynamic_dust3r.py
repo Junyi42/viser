@@ -29,6 +29,7 @@ def main(
     no_mask: bool = False,
     xyzw: bool = True,
     axes_scale: float = 0.25,
+    bg_downsample_factor: int = 1,
 ) -> None:
     from pathlib import Path  # <-- Import Path here if not already imported
     server = viser.ViserServer()
@@ -174,15 +175,22 @@ def main(
                     frame_node.visible = (i == t) if not gui_show_all_frames.value else (i % gui_stride.value == 0)
             server.flush()
             rec.insert_sleep(sleep_duration)
+
+        # set all invisible
+        with server.atomic():
+            for frame_node in frame_nodes:
+                frame_node.visible = False
         
         # Finish recording
         bs = rec.end_and_serialize()
         
         # Save the recording to a file
-        output_path = Path("./recording.viser")
+        output_path = Path(f"./viser_result/recording_{str(data_path).split('/')[-1]}.viser")
+        # make sure the output directory exists
+        output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_bytes(bs)
         print(f"Recording saved to {output_path.resolve()}")
-
+        
         # Restore the original frame visibility state
         with server.atomic():
             for frame_node, visibility in zip(frame_nodes, original_visibility):
@@ -203,7 +211,7 @@ def main(
     bg_colors = []
     for i in tqdm(range(num_frames)):
         frame = loader.get_frame(i)
-        position, color, bg_position, bg_color = frame.get_point_cloud(downsample_factor)
+        position, color, bg_position, bg_color = frame.get_point_cloud(downsample_factor, bg_downsample_factor)
 
         bg_positions.append(bg_position)
         bg_colors.append(bg_color)
@@ -324,6 +332,18 @@ if __name__ == "__main__":
         default=0.1,
         help="Scale of axes",
     )
+    parser.add_argument(
+        "--bg_downsample",
+        type=int,
+        default=1,
+        help="Background downsample factor",
+    )
+    parser.add_argument(
+        "--downsample",
+        type=int,
+        default=1,
+        help="Downsample factor",
+    )
 
     # Parse arguments
     args = parser.parse_args()
@@ -338,4 +358,6 @@ if __name__ == "__main__":
         no_mask=args.no_mask,
         xyzw=not args.wxyz,
         axes_scale=args.axes_scale,
+        bg_downsample_factor=args.bg_downsample,
+        downsample_factor=args.downsample,
     ))
