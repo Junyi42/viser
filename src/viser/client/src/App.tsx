@@ -298,7 +298,7 @@ function ViewerCanvas({ children }: { children: React.ReactNode }) {
       camera={{
         position: [
           0,// -0.3 * initDistanceScale,
-          0,// 0.3 * initDistanceScale,
+          0.1 * initDistanceScale,
           -0.3 * initDistanceScale,
         ],
         near: 0.05,
