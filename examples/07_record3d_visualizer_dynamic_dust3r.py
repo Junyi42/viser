@@ -149,6 +149,10 @@ def main(
     @gui_record_scene.on_click
     def _(_):
         gui_record_scene.disabled = True
+
+        # Save the original frame visibility state
+        original_visibility = [frame_node.visible for frame_node in frame_nodes]
+
         rec = server._start_scene_recording()
         rec.set_loop_start()
         
@@ -178,6 +182,12 @@ def main(
         output_path = Path("./recording.viser")
         output_path.write_bytes(bs)
         print(f"Recording saved to {output_path.resolve()}")
+
+        # Restore the original frame visibility state
+        with server.atomic():
+            for frame_node, visibility in zip(frame_nodes, original_visibility):
+                frame_node.visible = visibility
+        server.flush()
         
         gui_record_scene.disabled = False
 
