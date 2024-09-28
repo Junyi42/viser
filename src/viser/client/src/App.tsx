@@ -287,9 +287,22 @@ function ViewerCanvas({ children }: { children: React.ReactNode }) {
   const sendClickThrottled = useThrottledMessageSender(20);
   const theme = useMantineTheme();
 
+  const initDistanceScale = parseFloat(
+    new URLSearchParams(window.location.search).get("initDistanceScale") ??
+      "1.0",
+  );
+
   return (
     <Canvas
-      camera={{ position: [-3.0, 3.0, -3.0], near: 0.05 }}
+      shadows
+      camera={{
+        position: [
+          -0.3 * initDistanceScale,
+          0.3 * initDistanceScale,
+          -0.3 * initDistanceScale,
+        ],
+        near: 0.05,
+      }}
       gl={{ preserveDrawingBuffer: true }}
       style={{
         position: "relative",
