@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
+import os
 import json
 from pathlib import Path
 from typing import Tuple, cast
@@ -12,7 +13,6 @@ import numpy as onp
 import numpy.typing as onpt
 import skimage.transform
 from scipy.spatial.transform import Rotation
-
 
 class Record3dLoader_Customized:
     """Helper for loading frames for Record3D captures."""
@@ -71,24 +71,43 @@ class Record3dLoader_Customized:
         return len(self.rgb_paths)
 
     def get_frame(self, index: int) -> Record3dFrame:
-        # Read confidence.
-        conf = np.load(self.conf_paths[index])
-        conf: onpt.NDArray[onp.float32] = conf
-        # Clip confidence to avoid negative values
-        conf = np.clip(conf, 0.0001, 99999)
 
         # Read depth.
         depth = np.load(self.depth_paths[index])
-        depth: onpt.NDArray[onp.float32] = depth
+        depth: onp.NDArray[onp.float32] = depth
+        
+        # Check if conf file exists, otherwise initialize with ones
+        if len(self.conf_paths) == 0:
+            conf = np.ones_like(depth, dtype=onp.float32)
+        else:
+            conf_path = self.conf_paths[index]
+            if os.path.exists(conf_path):
+                conf = np.load(conf_path)
+                conf: onpt.NDArray[onp.float32] = conf
+                # Clip confidence to avoid negative values
+                conf = np.clip(conf, 0.0001, 99999)
+            else:
+                conf = np.ones_like(depth, dtype=onp.float32)
+        
+        # Check if mask file exists, otherwise initialize with zeros
+        if len(self.mask_paths) == 0:
+            mask = np.ones_like(depth, dtype=onp.bool_)
+        else:
+            mask_path = self.mask_paths[index]
+            if os.path.exists(mask_path):
+                mask = iio.imread(mask_path) > 0
+                mask: onpt.NDArray[onp.bool_] = mask
+            else:
+                mask = np.ones_like(depth, dtype=onp.bool_)
 
-        # Read mask.
-        mask = iio.imread(self.mask_paths[index]) > 0
-        mask: onpt.NDArray[onp.bool_] = mask
         if self.no_mask:
             mask = np.ones_like(mask).astype(np.bool_)
 
         # Read RGB.
         rgb = iio.imread(self.rgb_paths[index])
+        # if 4 channels, remove the alpha channel
+        if rgb.shape[-1] == 4:
+            rgb = rgb[..., :3]
 
         return Record3dFrame(
             K=self.K[index],
