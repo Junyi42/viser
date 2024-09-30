@@ -30,6 +30,8 @@ def main(
     xyzw: bool = True,
     axes_scale: float = 0.25,
     bg_downsample_factor: int = 1,
+    init_conf: bool = False,
+    cam_thickness: float = 1.5,
 ) -> None:
     from pathlib import Path  # <-- Import Path here if not already imported
     server = viser.ViserServer()
@@ -45,6 +47,7 @@ def main(
         foreground_conf_threshold=foreground_conf_threshold,
         no_mask=no_mask,
         xyzw=xyzw,
+        init_conf=init_conf,
     )
     num_frames = min(max_frames, loader.num_frames())
 
@@ -245,6 +248,7 @@ def main(
             wxyz=tf.SO3.from_matrix(frame.T_world_camera[:3, :3]).wxyz,
             position=frame.T_world_camera[:3, 3],
             color=color_rgb,  # Set the color for the frustum
+            thickness=cam_thickness,
         )
 
         # Add some axes.
@@ -344,6 +348,17 @@ if __name__ == "__main__":
         default=1,
         help="Downsample factor",
     )
+    parser.add_argument(
+        "--init_conf",
+        action="store_true",
+        help="Share the scene",
+    )
+    parser.add_argument(
+        "--cam_thickness",
+        type=float,
+        default=1.5,
+        help="Camera frustum thickness",
+    )
 
     # Parse arguments
     args = parser.parse_args()
@@ -360,4 +375,6 @@ if __name__ == "__main__":
         axes_scale=args.axes_scale,
         bg_downsample_factor=args.bg_downsample,
         downsample_factor=args.downsample,
+        init_conf=args.init_conf,
+        cam_thickness=args.cam_thickness,
     ))

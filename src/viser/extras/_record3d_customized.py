@@ -13,11 +13,12 @@ import numpy as onp
 import numpy.typing as onpt
 import skimage.transform
 from scipy.spatial.transform import Rotation
+from scipy.spatial import cKDTree
 
 class Record3dLoader_Customized:
     """Helper for loading frames for Record3D captures."""
 
-    def __init__(self, data_dir: Path, conf_threshold: float = 1.0, foreground_conf_threshold: float = 0.1, no_mask: bool = False, xyzw=True):
+    def __init__(self, data_dir: Path, conf_threshold: float = 1.0, foreground_conf_threshold: float = 0.1, no_mask: bool = False, xyzw=True, init_conf=False):
 
         # Read metadata.
         intrinsics_path = data_dir / "pred_intrinsics.txt"
@@ -25,6 +26,8 @@ class Record3dLoader_Customized:
 
         self.K: onp.ndarray = np.array(intrinsics, np.float32).reshape(-1, 3, 3)
         fps = 30
+
+        self.init_conf = init_conf
 
         poses_path = data_dir / "pred_traj.txt"
         poses = np.loadtxt(poses_path)
@@ -53,6 +56,10 @@ class Record3dLoader_Customized:
         # Read frames.
         self.rgb_paths = sorted(data_dir.glob("frame_*.png"), key=lambda p: int(p.stem.split("_")[-1]))
         self.depth_paths = sorted(data_dir.glob("frame_*.npy"), key=lambda p: int(p.stem.split("_")[-1]))
+        if init_conf:
+            self.init_conf_paths = sorted(data_dir.glob("init_conf_*.npy"), key=lambda p: int(p.stem.split("_")[-1]))
+        else:
+            self.init_conf_paths = []
         self.conf_paths = sorted(data_dir.glob("conf_*.npy"), key=lambda p: int(p.stem.split("_")[-1]))
         self.mask_paths = sorted(data_dir.glob("enlarged_dynamic_mask_*.png"), key=lambda p: int(p.stem.split("_")[-1]))
 
@@ -88,6 +95,19 @@ class Record3dLoader_Customized:
                 conf = np.clip(conf, 0.0001, 99999)
             else:
                 conf = np.ones_like(depth, dtype=onp.float32)
+
+        # Check if init conf file exists, otherwise initialize with ones
+        if len(self.init_conf_paths) == 0:
+            init_conf = np.ones_like(depth, dtype=onp.float32)
+        else:
+            init_conf_path = self.init_conf_paths[index]
+            if os.path.exists(init_conf_path):
+                init_conf = np.load(init_conf_path)
+                init_conf: onpt.NDArray[onp.float32] = init_conf
+                # Clip confidence to avoid negative values
+                init_conf = np.clip(init_conf, 0.0001, 99999)
+            else:
+                init_conf = np.ones_like(depth, dtype=onp.float32)
         
         # Check if mask file exists, otherwise initialize with zeros
         if len(self.mask_paths) == 0:
@@ -115,6 +135,7 @@ class Record3dLoader_Customized:
             depth=depth,
             mask=mask,
             conf=conf,
+            init_conf=init_conf,
             T_world_camera=self.T_world_cameras[index],
             conf_threshold=self.conf_threshold,
             foreground_conf_threshold=self.foreground_conf_threshold,
@@ -130,6 +151,7 @@ class Record3dFrame:
     depth: onpt.NDArray[onp.float32]
     mask: onpt.NDArray[onp.bool_]
     conf: onpt.NDArray[onp.float32]
+    init_conf: onpt.NDArray[onp.float32]
     T_world_camera: onpt.NDArray[onp.float32]
     conf_threshold: float = 1.0
     foreground_conf_threshold: float = 0.1
@@ -155,7 +177,10 @@ class Record3dFrame:
         )
         grid = grid * downsample_factor
         conf_mask = self.conf > self.conf_threshold
-        fg_conf_mask = self.conf > self.foreground_conf_threshold
+        if self.init_conf is not None:
+            fg_conf_mask = self.init_conf > self.foreground_conf_threshold
+        else:
+            fg_conf_mask = self.conf > self.foreground_conf_threshold
         # reshape the conf mask to the shape of the depth
         conf_mask = skimage.transform.resize(conf_mask, depth.shape, order=0)
         fg_conf_mask = skimage.transform.resize(fg_conf_mask, depth.shape, order=0)
