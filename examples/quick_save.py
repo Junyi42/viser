@@ -5,6 +5,7 @@ Batch process Record3D captures to generate recordings for multiple data folders
 
 import time
 import sys
+import os
 import argparse
 from pathlib import Path
 
@@ -41,7 +42,7 @@ def process_folder(
         foreground_conf_threshold=foreground_conf_threshold,
         no_mask=no_mask,
         xyzw=xyzw,
-        bg_downsample_factor=bg_downsample_factor,
+        init_conf=True,
     )
     num_frames = min(max_frames, loader.num_frames())
 
@@ -141,9 +142,6 @@ def process_folder(
     output_path.write_bytes(bs)
     print(f"Recording saved to {output_path.resolve()}")
 
-    # Clean up server
-    server.close()
-
 def main(
     data_paths: list[Path],
     output_dir: Path = Path("./viser_result"),
@@ -158,6 +156,13 @@ def main(
     axes_scale: float = 0.25,
     bg_downsample_factor: int = 1,
 ) -> None:
+    # if data_path[0] has subfolders, process each subfolder
+    if data_paths[0].is_dir():
+        new_data_paths = sorted([subfolder for subfolder in data_paths[0].iterdir() if subfolder.is_dir()])
+    
+    if len(new_data_paths) > 0:
+        data_paths = new_data_paths
+
     for data_path in data_paths:
         process_folder(
             data_path,
@@ -201,7 +206,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--fg_conf_thre",
         type=float,
-        default=0.0,
+        default=0.5,
         help="Foreground confidence threshold, default is 0.0",
     )
     parser.add_argument(
@@ -241,7 +246,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--downsample",
         type=int,
-        default=1,
+        default=2,
         help="Downsample factor",
     )
     parser.add_argument(
