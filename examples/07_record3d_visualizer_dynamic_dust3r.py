@@ -21,7 +21,7 @@ def main(
     data_path: Path = Path("/ssd2/junyi/dust3r/checkpoints/eval_sintel_monocular_depth_3datasets_3_7_epoch32_tmp0.01_swinstride5_flow0.01_0.2_35_gt_mask_iter300_fullseq/0/alley_2"),
     downsample_factor: int = 1,
     max_frames: int = 100,
-    share: bool = False,
+    share: bool = True,
     conf_threshold: float = 1.0,
     foreground_conf_threshold: float = 0.1,
     point_size: float = 0.001,
