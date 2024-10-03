@@ -168,10 +168,10 @@ export function SynchronizedCameraControls() {
       cameraControls.forward(-0.0005 * event?.deltaTime, true);
     });
     qKey.addEventListener("holding", (event) => {
-      cameraControls.elevate(-0.0005 * event?.deltaTime, true);
+      cameraControls.elevate(0.0005 * event?.deltaTime, true);
     });
     eKey.addEventListener("holding", (event) => {
-      cameraControls.elevate(0.0005 * event?.deltaTime, true);
+      cameraControls.elevate(-0.0005 * event?.deltaTime, true);
     });
 
     const leftKey = new holdEvent.KeyboardKeyHold("ArrowLeft", 20);
