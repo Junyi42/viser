@@ -104,7 +104,26 @@ export function SynchronizedCameraControls() {
   // Send camera for new connections.
   // We add a small delay to give the server time to add a callback.
   const connected = viewer.useGui((state) => state.websocketConnected);
+
+  const initHeightOffset = parseFloat(
+    new URLSearchParams(window.location.search).get("initHeightOffset") ??
+      "0.05",
+  );
+  // Add the height offset to the initial camera position
   React.useEffect(() => {
+    const cameraControls = viewer.cameraControlRef.current!;
+    const lookAt = new THREE.Vector3();
+    cameraControls.getTarget(lookAt);
+
+    viewer.cameraControlRef.current!.setLookAt(
+      camera.position.x,
+      camera.position.y + (camera.position.y / 0.1) * initHeightOffset, // init_scale: camera.position.y / 0.1 
+      camera.position.z,
+      lookAt.x,
+      lookAt.y + (camera.position.y / 0.1) * initHeightOffset,
+      lookAt.z,
+      true,
+    );
     viewer.sendCameraRef.current = sendCamera;
     if (!connected) return;
     setTimeout(() => sendCamera(), 50);
@@ -137,22 +156,22 @@ export function SynchronizedCameraControls() {
     // TODO: these event listeners are currently never removed, even if this
     // component gets unmounted.
     aKey.addEventListener("holding", (event) => {
-      cameraControls.truck(-0.002 * event?.deltaTime, 0, true);
+      cameraControls.truck(-0.0005 * event?.deltaTime, 0, true);
     });
     dKey.addEventListener("holding", (event) => {
-      cameraControls.truck(0.002 * event?.deltaTime, 0, true);
+      cameraControls.truck(0.0005 * event?.deltaTime, 0, true);
     });
     wKey.addEventListener("holding", (event) => {
-      cameraControls.forward(0.002 * event?.deltaTime, true);
+      cameraControls.forward(0.0005 * event?.deltaTime, true);
     });
     sKey.addEventListener("holding", (event) => {
-      cameraControls.forward(-0.002 * event?.deltaTime, true);
+      cameraControls.forward(-0.0005 * event?.deltaTime, true);
     });
     qKey.addEventListener("holding", (event) => {
-      cameraControls.elevate(-0.002 * event?.deltaTime, true);
+      cameraControls.elevate(-0.0005 * event?.deltaTime, true);
     });
     eKey.addEventListener("holding", (event) => {
-      cameraControls.elevate(0.002 * event?.deltaTime, true);
+      cameraControls.elevate(0.0005 * event?.deltaTime, true);
     });
 
     const leftKey = new holdEvent.KeyboardKeyHold("ArrowLeft", 20);
