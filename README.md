@@ -13,7 +13,7 @@
 </p>
 
 
-### This repo is a customized version of https://github.com/nerfstudio-project/viser for project MonST3R (https://monst3r-project.github.io/)**
+### This repo is a customized version of https://github.com/nerfstudio-project/viser for project MonST3R (https://monst3r-project.github.io/)
 
 `viser` is a library for interactive 3D visualization in Python.
 
