@@ -156,22 +156,22 @@ export function SynchronizedCameraControls() {
     // TODO: these event listeners are currently never removed, even if this
     // component gets unmounted.
     aKey.addEventListener("holding", (event) => {
-      cameraControls.truck(-0.0005 * event?.deltaTime, 0, true);
+      cameraControls.truck(-0.0002 * event?.deltaTime, 0, true);
     });
     dKey.addEventListener("holding", (event) => {
-      cameraControls.truck(0.0005 * event?.deltaTime, 0, true);
+      cameraControls.truck(0.0002 * event?.deltaTime, 0, true);
     });
     wKey.addEventListener("holding", (event) => {
-      cameraControls.forward(0.0005 * event?.deltaTime, true);
+      cameraControls.forward(0.0002 * event?.deltaTime, true);
     });
     sKey.addEventListener("holding", (event) => {
-      cameraControls.forward(-0.0005 * event?.deltaTime, true);
+      cameraControls.forward(-0.0002 * event?.deltaTime, true);
     });
     qKey.addEventListener("holding", (event) => {
-      cameraControls.elevate(0.0005 * event?.deltaTime, true);
+      cameraControls.elevate(0.0002 * event?.deltaTime, true);
     });
     eKey.addEventListener("holding", (event) => {
-      cameraControls.elevate(-0.0005 * event?.deltaTime, true);
+      cameraControls.elevate(-0.0002 * event?.deltaTime, true);
     });
 
     const leftKey = new holdEvent.KeyboardKeyHold("ArrowLeft", 20);
