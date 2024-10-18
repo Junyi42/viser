@@ -1,8 +1,3 @@
-"""Record3D visualizer
-
-Parse and stream record3d captures. To get the demo data, see `./assets/download_record3d_dance.sh`.
-"""
-
 import time
 import sys
 import argparse
@@ -18,7 +13,7 @@ import viser.transforms as tf
 import matplotlib.cm as cm  # For colormap
 
 def main(
-    data_path: Path = Path("/ssd2/junyi/dust3r/checkpoints/eval_sintel_monocular_depth_3datasets_3_7_epoch32_tmp0.01_swinstride5_flow0.01_0.2_35_gt_mask_iter300_fullseq/0/alley_2"),
+    data_path: Path = Path("./demo_tmp/NULL"),
     downsample_factor: int = 1,
     max_frames: int = 100,
     share: bool = True,
@@ -293,7 +288,7 @@ if __name__ == "__main__":
         "--data",
         type=Path,
         nargs="?",
-        default=Path("/ssd2/junyi/dust3r/checkpoints/eval_sintel_monocular_depth_3datasets_3_7_epoch32_tmp0.01_swinstride5_flow0.01_0.2_35_gt_mask_iter300_fullseq/0/alley_2"),
+        default=Path("./demo_tmp/NULL"),
         help="Path to the data"
     )
     parser.add_argument(
