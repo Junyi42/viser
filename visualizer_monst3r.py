@@ -34,7 +34,9 @@ def main(
         server.request_share_url()
 
     server.scene.set_up_direction('-z')
-
+    if no_mask:             # not using dynamic / static mask
+        init_conf = True    # must use init_conf map, to avoid depth cleaning
+        fg_conf_thre = conf_threshold # now fg_conf_thre is the same as conf_thre
     print("Loading frames!")
     loader = viser.extras.Record3dLoader_Customized(
         data_path,

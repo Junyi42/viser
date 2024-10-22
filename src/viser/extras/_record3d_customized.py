@@ -97,8 +97,8 @@ class Record3dLoader_Customized:
                 conf = np.ones_like(depth, dtype=onp.float32)
 
         # Check if init conf file exists, otherwise initialize with ones
-        if len(self.init_conf_paths) == 0:
-            init_conf = np.ones_like(depth, dtype=onp.float32)
+        if len(self.init_conf_paths) == 0:  # If init conf is not available, use conf
+            init_conf = conf
         else:
             init_conf_path = self.init_conf_paths[index]
             if os.path.exists(init_conf_path):
