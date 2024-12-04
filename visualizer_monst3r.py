@@ -16,7 +16,7 @@ def main(
     data_path: Path = Path("./demo_tmp/NULL"),
     downsample_factor: int = 1,
     max_frames: int = 100,
-    share: bool = True,
+    share: bool = False,
     conf_threshold: float = 1.0,
     foreground_conf_threshold: float = 0.1,
     point_size: float = 0.001,
