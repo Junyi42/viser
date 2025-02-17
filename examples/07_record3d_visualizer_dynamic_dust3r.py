@@ -233,7 +233,7 @@ def main(
 
         # Compute color for frustum based on frame index.
         norm_i = i / (num_frames - 1) if num_frames > 1 else 0  # Normalize index to [0, 1]
-        color_rgba = cm.viridis(norm_i)  # Get RGBA color from colormap
+        color_rgba = cm.get_cmap('viridis')(norm_i)  # Get RGBA color from colormap
         color_rgb = color_rgba[:3]  # Use RGB components
 
         # Place the frustum with the computed color.
@@ -248,7 +248,7 @@ def main(
             wxyz=tf.SO3.from_matrix(frame.T_world_camera[:3, :3]).wxyz,
             position=frame.T_world_camera[:3, 3],
             color=color_rgb,  # Set the color for the frustum
-            thickness=cam_thickness,
+            line_width=cam_thickness,
         )
 
         # Add some axes.
