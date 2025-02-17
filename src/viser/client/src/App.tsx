@@ -2,15 +2,11 @@
 import "@mantine/core/styles.css";
 import "@mantine/notifications/styles.css";
 import "./App.css";
+import { useInView } from "react-intersection-observer";
 
 import { Notifications } from "@mantine/notifications";
 
-import {
-  CameraControls,
-  Environment,
-  PerformanceMonitor,
-  Stats,
-} from "@react-three/drei";
+import { Environment, PerformanceMonitor, Stats } from "@react-three/drei";
 import * as THREE from "three";
 import { Canvas, useThree, useFrame } from "@react-three/fiber";
 
@@ -27,19 +23,18 @@ import {
   useMantineTheme,
 } from "@mantine/core";
 import React, { useEffect } from "react";
-import { SceneNodeThreeObject, UseSceneTree } from "./SceneTree";
+import { SceneNodeThreeObject } from "./SceneTree";
+import { ViewerContext, ViewerContextContents } from "./ViewerContext";
 
 import "./index.css";
 
 import ControlPanel from "./ControlPanel/ControlPanel";
-import { UseGui, useGuiState } from "./ControlPanel/GuiState";
+import { useGuiState } from "./ControlPanel/GuiState";
 import { searchParamKey } from "./SearchParamsUtils";
 import { WebsocketMessageProducer } from "./WebsocketInterface";
-
 import { Titlebar } from "./Titlebar";
 import { ViserModal } from "./Modal";
 import { useSceneTreeState } from "./SceneTreeState";
-import { GetRenderRequestMessage, Message } from "./WebsocketMessages";
 import { useThrottledMessageSender } from "./WebsocketFunctions";
 import { useDisclosure } from "@mantine/hooks";
 import { rayToViserCoords } from "./WorldTransformUtils";
@@ -49,68 +44,7 @@ import { FrameSynchronizedMessageHandler } from "./MessageHandler";
 import { PlaybackFromFile } from "./FilePlayback";
 import { SplatRenderContext } from "./Splatting/GaussianSplats";
 import { BrowserWarning } from "./BrowserWarning";
-
-export type ViewerContextContents = {
-  messageSource: "websocket" | "file_playback";
-  // Zustand hooks.
-  useSceneTree: UseSceneTree;
-  useGui: UseGui;
-  // Useful references.
-  // TODO: there's really no reason these all need to be their own ref objects.
-  // We could have just one ref to a global mutable struct.
-  sendMessageRef: React.MutableRefObject<(message: Message) => void>;
-  canvasRef: React.MutableRefObject<HTMLCanvasElement | null>;
-  sceneRef: React.MutableRefObject<THREE.Scene | null>;
-  cameraRef: React.MutableRefObject<THREE.PerspectiveCamera | null>;
-  backgroundMaterialRef: React.MutableRefObject<THREE.ShaderMaterial | null>;
-  cameraControlRef: React.MutableRefObject<CameraControls | null>;
-  sendCameraRef: React.MutableRefObject<(() => void) | null>;
-  resetCameraViewRef: React.MutableRefObject<(() => void) | null>;
-  // Scene node attributes.
-  // This is intentionally placed outside of the Zustand state to reduce overhead.
-  nodeAttributesFromName: React.MutableRefObject<{
-    [name: string]:
-      | undefined
-      | {
-          poseUpdateState?: "updated" | "needsUpdate" | "waitForMakeObject";
-          wxyz?: [number, number, number, number];
-          position?: [number, number, number];
-          visibility?: boolean; // Visibility state from the server.
-          overrideVisibility?: boolean; // Override from the GUI.
-        };
-  }>;
-  nodeRefFromName: React.MutableRefObject<{
-    [name: string]: undefined | THREE.Object3D;
-  }>;
-  messageQueueRef: React.MutableRefObject<Message[]>;
-  // Requested a render.
-  getRenderRequestState: React.MutableRefObject<
-    "ready" | "triggered" | "pause" | "in_progress"
-  >;
-  getRenderRequest: React.MutableRefObject<null | GetRenderRequestMessage>;
-  // Track click drag events.
-  scenePointerInfo: React.MutableRefObject<{
-    enabled: false | "click" | "rect-select"; // Enable box events.
-    dragStart: [number, number]; // First mouse position.
-    dragEnd: [number, number]; // Final mouse position.
-    isDragging: boolean;
-  }>;
-  // 2D canvas for drawing -- can be used to give feedback on cursor movement, or more.
-  canvas2dRef: React.MutableRefObject<HTMLCanvasElement | null>;
-  // Poses for bones in skinned meshes.
-  skinnedMeshState: React.MutableRefObject<{
-    [name: string]: {
-      initialized: boolean;
-      poses: {
-        wxyz: [number, number, number, number];
-        position: [number, number, number];
-      }[];
-    };
-  }>;
-};
-export const ViewerContext = React.createContext<null | ViewerContextContents>(
-  null,
-);
+import { AutoShadowDirectionalLight } from "./ThreeAssets";
 
 THREE.ColorManagement.enabled = true;
 
@@ -282,196 +216,307 @@ function ViewerContents({ children }: { children: React.ReactNode }) {
   );
 }
 
+const DisableRender = () => useFrame(() => null, 1000);
+
 function ViewerCanvas({ children }: { children: React.ReactNode }) {
   const viewer = React.useContext(ViewerContext)!;
   const sendClickThrottled = useThrottledMessageSender(20);
   const theme = useMantineTheme();
 
-  const initDistanceScale = parseFloat(
-    new URLSearchParams(window.location.search).get("initDistanceScale") ??
-      "1.0",
+  // Make sure we don't re-mount the camera controls, since that will reset the camera position.
+  const memoizedCameraControls = React.useMemo(
+    () => <SynchronizedCameraControls />,
+    [],
   );
 
+  // We'll disable rendering if the canvas is not in view.
+  const { ref: inViewRef, inView } = useInView();
+
   return (
-    <Canvas
-      shadows
-      camera={{
-        position: [
-          0,// -0.3 * initDistanceScale,
-          0.1 * initDistanceScale,
-          -0.3 * initDistanceScale,
-        ],
-        near: 0.05,
-      }}
-      gl={{ preserveDrawingBuffer: true }}
+    <div
+      ref={inViewRef}
       style={{
         position: "relative",
         zIndex: 0,
         width: "100%",
         height: "100%",
       }}
-      ref={viewer.canvasRef}
-      // Handle scene click events (onPointerDown, onPointerMove, onPointerUp)
-      onPointerDown={(e) => {
-        const pointerInfo = viewer.scenePointerInfo.current!;
+    >
+      <Canvas
+        camera={{ position: [-3.0, 3.0, -3.0], near: 0.01, far: 1000.0 }}
+        gl={{ preserveDrawingBuffer: true }}
+        style={{
+          width: "100%",
+          height: "100%",
+        }}
+        ref={viewer.canvasRef}
+        // Handle scene click events (onPointerDown, onPointerMove, onPointerUp)
+        onPointerDown={(e) => {
+          const pointerInfo = viewer.scenePointerInfo.current!;
 
-        // Only handle pointer events if enabled.
-        if (pointerInfo.enabled === false) return;
+          // Only handle pointer events if enabled.
+          if (pointerInfo.enabled === false) return;
 
-        // Keep track of the first click position.
-        const canvasBbox = viewer.canvasRef.current!.getBoundingClientRect();
-        pointerInfo.dragStart = [
-          e.clientX - canvasBbox.left,
-          e.clientY - canvasBbox.top,
-        ];
-        pointerInfo.dragEnd = pointerInfo.dragStart;
+          // Keep track of the first click position.
+          const canvasBbox = viewer.canvasRef.current!.getBoundingClientRect();
+          pointerInfo.dragStart = [
+            e.clientX - canvasBbox.left,
+            e.clientY - canvasBbox.top,
+          ];
+          pointerInfo.dragEnd = pointerInfo.dragStart;
 
-        // Check if pointer position is in bounds.
-        if (ndcFromPointerXy(viewer, pointerInfo.dragEnd) === null) return;
+          // Check if pointer position is in bounds.
+          if (ndcFromPointerXy(viewer, pointerInfo.dragEnd) === null) return;
 
-        // Only allow one drag event at a time.
-        if (pointerInfo.isDragging) return;
-        pointerInfo.isDragging = true;
+          // Only allow one drag event at a time.
+          if (pointerInfo.isDragging) return;
+          pointerInfo.isDragging = true;
 
-        // Disable camera controls -- we don't want the camera to move while we're dragging.
-        viewer.cameraControlRef.current!.enabled = false;
+          // Disable camera controls -- we don't want the camera to move while we're dragging.
+          viewer.cameraControlRef.current!.enabled = false;
 
-        const ctx = viewer.canvas2dRef.current!.getContext("2d")!;
-        ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
-      }}
-      onPointerMove={(e) => {
-        const pointerInfo = viewer.scenePointerInfo.current!;
-
-        // Only handle if click events are enabled, and if pointer is down (i.e., dragging).
-        if (pointerInfo.enabled === false || !pointerInfo.isDragging) return;
-
-        // Check if pointer position is in boudns.
-        const canvasBbox = viewer.canvasRef.current!.getBoundingClientRect();
-        const pointerXy: [number, number] = [
-          e.clientX - canvasBbox.left,
-          e.clientY - canvasBbox.top,
-        ];
-        if (ndcFromPointerXy(viewer, pointerXy) === null) return;
-
-        // Check if mouse position has changed sufficiently from last position.
-        // Uses 3px as a threshood, similar to drag detection in
-        // `SceneNodeClickMessage` from `SceneTree.tsx`.
-        pointerInfo.dragEnd = pointerXy;
-        if (
-          Math.abs(pointerInfo.dragEnd[0] - pointerInfo.dragStart[0]) <= 3 &&
-          Math.abs(pointerInfo.dragEnd[1] - pointerInfo.dragStart[1]) <= 3
-        )
-          return;
-
-        // If we're listening for scene box events, draw the box on the 2D canvas for user feedback.
-        if (pointerInfo.enabled === "rect-select") {
           const ctx = viewer.canvas2dRef.current!.getContext("2d")!;
           ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
-          ctx.beginPath();
-          ctx.fillStyle = theme.primaryColor;
-          ctx.strokeStyle = "blue";
-          ctx.globalAlpha = 0.2;
-          ctx.fillRect(
-            pointerInfo.dragStart[0],
-            pointerInfo.dragStart[1],
-            pointerInfo.dragEnd[0] - pointerInfo.dragStart[0],
-            pointerInfo.dragEnd[1] - pointerInfo.dragStart[1],
-          );
-          ctx.globalAlpha = 1.0;
-          ctx.stroke();
-        }
-      }}
-      onPointerUp={() => {
-        const pointerInfo = viewer.scenePointerInfo.current!;
+        }}
+        onPointerMove={(e) => {
+          const pointerInfo = viewer.scenePointerInfo.current!;
 
-        // Re-enable camera controls! Was disabled in `onPointerDown`, to allow
-        // for mouse drag w/o camera movement.
-        viewer.cameraControlRef.current!.enabled = true;
+          // Only handle if click events are enabled, and if pointer is down (i.e., dragging).
+          if (pointerInfo.enabled === false || !pointerInfo.isDragging) return;
 
-        // Only handle if click events are enabled, and if pointer was down (i.e., dragging).
-        if (pointerInfo.enabled === false || !pointerInfo.isDragging) return;
-
-        const ctx = viewer.canvas2dRef.current!.getContext("2d")!;
-        ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
-
-        // If there's only one pointer, send a click message.
-        // The message will return origin/direction lists of length 1.
-        if (pointerInfo.enabled === "click") {
-          const raycaster = new THREE.Raycaster();
-
-          // Raycaster expects NDC coordinates, so we convert the click event to NDC.
-          const mouseVector = ndcFromPointerXy(viewer, pointerInfo.dragEnd);
-          if (mouseVector === null) return;
-          raycaster.setFromCamera(mouseVector, viewer.cameraRef.current!);
-          const ray = rayToViserCoords(viewer, raycaster.ray);
-
-          // Send OpenCV image coordinates to the server (normalized).
-          const mouseVectorOpenCV = opencvXyFromPointerXy(
-            viewer,
-            pointerInfo.dragEnd,
-          );
-
-          sendClickThrottled({
-            type: "ScenePointerMessage",
-            event_type: "click",
-            ray_origin: [ray.origin.x, ray.origin.y, ray.origin.z],
-            ray_direction: [ray.direction.x, ray.direction.y, ray.direction.z],
-            screen_pos: [[mouseVectorOpenCV.x, mouseVectorOpenCV.y]],
-          });
-        } else if (pointerInfo.enabled === "rect-select") {
-          // If the ScenePointerEvent had mouse drag movement, we will send a "box" message:
-          // Use the first and last mouse positions to create a box.
-          // Again, click should be in openCV image coordinates (normalized).
-          const firstMouseVector = opencvXyFromPointerXy(
-            viewer,
-            pointerInfo.dragStart,
-          );
-          const lastMouseVector = opencvXyFromPointerXy(
-            viewer,
-            pointerInfo.dragEnd,
-          );
-
-          const x_min = Math.min(firstMouseVector.x, lastMouseVector.x);
-          const x_max = Math.max(firstMouseVector.x, lastMouseVector.x);
-          const y_min = Math.min(firstMouseVector.y, lastMouseVector.y);
-          const y_max = Math.max(firstMouseVector.y, lastMouseVector.y);
-
-          // Send the upper-left and lower-right corners of the box.
-          const screenBoxList: [number, number][] = [
-            [x_min, y_min],
-            [x_max, y_max],
+          // Check if pointer position is in boudns.
+          const canvasBbox = viewer.canvasRef.current!.getBoundingClientRect();
+          const pointerXy: [number, number] = [
+            e.clientX - canvasBbox.left,
+            e.clientY - canvasBbox.top,
           ];
+          if (ndcFromPointerXy(viewer, pointerXy) === null) return;
 
-          sendClickThrottled({
-            type: "ScenePointerMessage",
-            event_type: "rect-select",
-            ray_origin: null,
-            ray_direction: null,
-            screen_pos: screenBoxList,
-          });
-        }
+          // Check if mouse position has changed sufficiently from last position.
+          // Uses 3px as a threshood, similar to drag detection in
+          // `SceneNodeClickMessage` from `SceneTree.tsx`.
+          pointerInfo.dragEnd = pointerXy;
+          if (
+            Math.abs(pointerInfo.dragEnd[0] - pointerInfo.dragStart[0]) <= 3 &&
+            Math.abs(pointerInfo.dragEnd[1] - pointerInfo.dragStart[1]) <= 3
+          )
+            return;
 
-        // Release drag lock.
-        pointerInfo.isDragging = false;
-      }}
-    >
-      {children}
-      <BackgroundImage />
-      <AdaptiveDpr />
-      <SceneContextSetter />
-      <SynchronizedCameraControls />
-      <SplatRenderContext>
-        <SceneNodeThreeObject name="" parent={null} />
-      </SplatRenderContext>
-      <Environment path="hdri/" files="potsdamer_platz_1k.hdr" />
-      <directionalLight color={0xffffff} intensity={1.0} position={[0, 1, 0]} />
-      <directionalLight
-        color={0xffffff}
-        intensity={0.2}
-        position={[0, -1, 0]}
-      />
-    </Canvas>
+          // If we're listening for scene box events, draw the box on the 2D canvas for user feedback.
+          if (pointerInfo.enabled === "rect-select") {
+            const ctx = viewer.canvas2dRef.current!.getContext("2d")!;
+            ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+            ctx.beginPath();
+            ctx.fillStyle = theme.primaryColor;
+            ctx.strokeStyle = "blue";
+            ctx.globalAlpha = 0.2;
+            ctx.fillRect(
+              pointerInfo.dragStart[0],
+              pointerInfo.dragStart[1],
+              pointerInfo.dragEnd[0] - pointerInfo.dragStart[0],
+              pointerInfo.dragEnd[1] - pointerInfo.dragStart[1],
+            );
+            ctx.globalAlpha = 1.0;
+            ctx.stroke();
+          }
+        }}
+        onPointerUp={() => {
+          const pointerInfo = viewer.scenePointerInfo.current!;
+
+          // Re-enable camera controls! Was disabled in `onPointerDown`, to allow
+          // for mouse drag w/o camera movement.
+          viewer.cameraControlRef.current!.enabled = true;
+
+          // Only handle if click events are enabled, and if pointer was down (i.e., dragging).
+          if (pointerInfo.enabled === false || !pointerInfo.isDragging) return;
+
+          const ctx = viewer.canvas2dRef.current!.getContext("2d")!;
+          ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+
+          // If there's only one pointer, send a click message.
+          // The message will return origin/direction lists of length 1.
+          if (pointerInfo.enabled === "click") {
+            const raycaster = new THREE.Raycaster();
+
+            // Raycaster expects NDC coordinates, so we convert the click event to NDC.
+            const mouseVector = ndcFromPointerXy(viewer, pointerInfo.dragEnd);
+            if (mouseVector === null) return;
+            raycaster.setFromCamera(mouseVector, viewer.cameraRef.current!);
+            const ray = rayToViserCoords(viewer, raycaster.ray);
+
+            // Send OpenCV image coordinates to the server (normalized).
+            const mouseVectorOpenCV = opencvXyFromPointerXy(
+              viewer,
+              pointerInfo.dragEnd,
+            );
+
+            sendClickThrottled({
+              type: "ScenePointerMessage",
+              event_type: "click",
+              ray_origin: [ray.origin.x, ray.origin.y, ray.origin.z],
+              ray_direction: [
+                ray.direction.x,
+                ray.direction.y,
+                ray.direction.z,
+              ],
+              screen_pos: [[mouseVectorOpenCV.x, mouseVectorOpenCV.y]],
+            });
+          } else if (pointerInfo.enabled === "rect-select") {
+            // If the ScenePointerEvent had mouse drag movement, we will send a "box" message:
+            // Use the first and last mouse positions to create a box.
+            // Again, click should be in openCV image coordinates (normalized).
+            const firstMouseVector = opencvXyFromPointerXy(
+              viewer,
+              pointerInfo.dragStart,
+            );
+            const lastMouseVector = opencvXyFromPointerXy(
+              viewer,
+              pointerInfo.dragEnd,
+            );
+
+            const x_min = Math.min(firstMouseVector.x, lastMouseVector.x);
+            const x_max = Math.max(firstMouseVector.x, lastMouseVector.x);
+            const y_min = Math.min(firstMouseVector.y, lastMouseVector.y);
+            const y_max = Math.max(firstMouseVector.y, lastMouseVector.y);
+
+            // Send the upper-left and lower-right corners of the box.
+            const screenBoxList: [number, number][] = [
+              [x_min, y_min],
+              [x_max, y_max],
+            ];
+
+            sendClickThrottled({
+              type: "ScenePointerMessage",
+              event_type: "rect-select",
+              ray_origin: null,
+              ray_direction: null,
+              screen_pos: screenBoxList,
+            });
+          }
+
+          // Release drag lock.
+          pointerInfo.isDragging = false;
+        }}
+        shadows
+      >
+        {inView ? null : <DisableRender />}
+        <BackgroundImage />
+        <SceneContextSetter />
+        {memoizedCameraControls}
+        <SplatRenderContext>
+          <AdaptiveDpr />
+          {children}
+          <SceneNodeThreeObject name="" parent={null} />
+        </SplatRenderContext>
+        <DefaultLights />
+      </Canvas>
+    </div>
   );
+}
+
+function DefaultLights() {
+  const viewer = React.useContext(ViewerContext)!;
+  const enableDefaultLights = viewer.useSceneTree(
+    (state) => state.enableDefaultLights,
+  );
+  const enableDefaultLightsShadows = viewer.useSceneTree(
+    (state) => state.enableDefaultLightsShadows,
+  );
+  const environmentMap = viewer.useSceneTree((state) => state.environmentMap);
+
+  // Environment map frames:
+  // - We want the `background_wxyz` and `environment_wxyz` to be in the Viser
+  //   world frame. This is different from the threejs world frame, which should
+  //   not be exposed to the user.
+  // - `backgroundRotation` and `environmentRotation` for the `Environment` component
+  //   are in the threejs world frame.
+  const [R_threeworld_world, setR_threeworld_world] = React.useState(
+    // In Python, this will be set by `set_up_direction()`.
+    viewer.nodeAttributesFromName.current![""]!.wxyz!,
+  );
+  useFrame(() => {
+    const currentR_threeworld_world =
+      viewer.nodeAttributesFromName.current![""]!.wxyz!;
+    if (currentR_threeworld_world !== R_threeworld_world) {
+      setR_threeworld_world(currentR_threeworld_world);
+    }
+  });
+
+  const Rquat_threeworld_world = new THREE.Quaternion(
+    R_threeworld_world[1],
+    R_threeworld_world[2],
+    R_threeworld_world[3],
+    R_threeworld_world[0],
+  );
+  const Rquat_world_threeworld = Rquat_threeworld_world.clone().invert();
+  const backgroundRotation = new THREE.Euler().setFromQuaternion(
+    new THREE.Quaternion(
+      environmentMap.background_wxyz[1],
+      environmentMap.background_wxyz[2],
+      environmentMap.background_wxyz[3],
+      environmentMap.background_wxyz[0],
+    )
+      .premultiply(Rquat_threeworld_world)
+      .multiply(Rquat_world_threeworld),
+  );
+  const environmentRotation = new THREE.Euler().setFromQuaternion(
+    new THREE.Quaternion(
+      environmentMap.environment_wxyz[1],
+      environmentMap.environment_wxyz[2],
+      environmentMap.environment_wxyz[3],
+      environmentMap.environment_wxyz[0],
+    )
+      .premultiply(Rquat_threeworld_world)
+      .multiply(Rquat_world_threeworld),
+  );
+
+  let envMapNode;
+  if (environmentMap.hdri === null) {
+    envMapNode = null;
+  } else {
+    const presetsObj = {
+      apartment: "lebombo_1k.hdr",
+      city: "potsdamer_platz_1k.hdr",
+      dawn: "kiara_1_dawn_1k.hdr",
+      forest: "forest_slope_1k.hdr",
+      lobby: "st_fagans_interior_1k.hdr",
+      night: "dikhololo_night_1k.hdr",
+      park: "rooitou_park_1k.hdr",
+      studio: "studio_small_03_1k.hdr",
+      sunset: "venice_sunset_1k.hdr",
+      warehouse: "empty_warehouse_01_1k.hdr",
+    };
+    envMapNode = (
+      <Environment
+        files={`hdri/${presetsObj[environmentMap.hdri]}`}
+        background={environmentMap.background}
+        backgroundBlurriness={environmentMap.background_blurriness}
+        backgroundIntensity={environmentMap.background_intensity}
+        backgroundRotation={backgroundRotation}
+        environmentIntensity={environmentMap.environment_intensity}
+        environmentRotation={environmentRotation}
+      />
+    );
+  }
+  if (enableDefaultLights)
+    return (
+      <>
+        <AutoShadowDirectionalLight
+          color={0xffffff}
+          intensity={2.0}
+          position={[-0.2, 1, -0.2]}
+          castShadow={enableDefaultLightsShadows}
+        />
+        <AutoShadowDirectionalLight
+          color={0xffffff}
+          intensity={0.4}
+          position={[0, -1, 0]}
+          castShadow={false /* Let's only cast a shadow from above. */}
+        />
+        {envMapNode}
+      </>
+    );
+  else return envMapNode;
 }
 
 function AdaptiveDpr() {
@@ -479,11 +524,9 @@ function AdaptiveDpr() {
   return (
     <PerformanceMonitor
       factor={1.0}
-      ms={100}
-      iterations={5}
-      step={0.1}
+      step={0.2}
       bounds={(refreshrate) => {
-        const max = Math.min(refreshrate * 0.9, 85);
+        const max = Math.min(refreshrate * 0.75, 85);
         const min = Math.max(max * 0.5, 38);
         return [min, max];
       }}
@@ -630,11 +673,7 @@ function BackgroundImage() {
   });
 
   return (
-    <mesh
-      ref={backgroundMesh}
-      material={backgroundMaterial}
-      matrixWorldAutoUpdate={false}
-    >
+    <mesh ref={backgroundMesh} material={backgroundMaterial}>
       <planeGeometry attach="geometry" args={[1, 1]} />
     </mesh>
   );
@@ -716,7 +755,7 @@ function ViserLogo() {
             </Anchor>
             &nbsp;&nbsp;&bull;&nbsp;&nbsp;
             <Anchor
-              href="https://viser.studio/latest"
+              href="https://viser.studio/main"
               target="_blank"
               fw="600"
               style={{ "&:focus": { outline: "none" } }}

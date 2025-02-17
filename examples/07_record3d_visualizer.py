@@ -6,7 +6,7 @@ Parse and stream record3d captures. To get the demo data, see `./assets/download
 import time
 from pathlib import Path
 
-import numpy as onp
+import numpy as np
 import tyro
 from tqdm.auto import tqdm
 
@@ -31,6 +31,13 @@ def main(
 
     # Add playback UI.
     with server.gui.add_folder("Playback"):
+        gui_point_size = server.gui.add_slider(
+            "Point size",
+            min=0.001,
+            max=0.02,
+            step=1e-3,
+            initial_value=0.01,
+        )
         gui_timestep = server.gui.add_slider(
             "Timestep",
             min=0,
@@ -78,6 +85,7 @@ def main(
         nonlocal prev_timestep
         current_timestep = gui_timestep.value
         with server.atomic():
+            # Toggle visibility.
             frame_nodes[current_timestep].visible = True
             frame_nodes[prev_timestep].visible = False
         prev_timestep = current_timestep
@@ -86,11 +94,12 @@ def main(
     # Load in frames.
     server.scene.add_frame(
         "/frames",
-        wxyz=tf.SO3.exp(onp.array([onp.pi / 2.0, 0.0, 0.0])).wxyz,
+        wxyz=tf.SO3.exp(np.array([np.pi / 2.0, 0.0, 0.0])).wxyz,
         position=(0, 0, 0),
         show_axes=False,
     )
     frame_nodes: list[viser.FrameHandle] = []
+    point_nodes: list[viser.PointCloudHandle] = []
     for i in tqdm(range(num_frames)):
         frame = loader.get_frame(i)
         position, color = frame.get_point_cloud(downsample_factor)
@@ -99,16 +108,18 @@ def main(
         frame_nodes.append(server.scene.add_frame(f"/frames/t{i}", show_axes=False))
 
         # Place the point cloud in the frame.
-        server.scene.add_point_cloud(
-            name=f"/frames/t{i}/point_cloud",
-            points=position,
-            colors=color,
-            point_size=0.01,
-            point_shape="rounded",
+        point_nodes.append(
+            server.scene.add_point_cloud(
+                name=f"/frames/t{i}/point_cloud",
+                points=position,
+                colors=color,
+                point_size=gui_point_size.value,
+                point_shape="rounded",
+            )
         )
 
         # Place the frustum.
-        fov = 2 * onp.arctan2(frame.rgb.shape[0] / 2, frame.K[0, 0])
+        fov = 2 * np.arctan2(frame.rgb.shape[0] / 2, frame.K[0, 0])
         aspect = frame.rgb.shape[1] / frame.rgb.shape[0]
         server.scene.add_camera_frustum(
             f"/frames/t{i}/frustum",
@@ -134,8 +145,19 @@ def main(
     # Playback update loop.
     prev_timestep = gui_timestep.value
     while True:
+        # Update the timestep if we're playing.
         if gui_playing.value:
             gui_timestep.value = (gui_timestep.value + 1) % num_frames
+
+        # Update point size of both this timestep and the next one! There's
+        # redundancy here, but this will be optimized out internally by viser.
+        #
+        # We update the point size for the next timestep so that it will be
+        # immediately available when we toggle the visibility.
+        point_nodes[gui_timestep.value].point_size = gui_point_size.value
+        point_nodes[
+            (gui_timestep.value + 1) % num_frames
+        ].point_size = gui_point_size.value
 
         time.sleep(1.0 / gui_framerate.value)
 

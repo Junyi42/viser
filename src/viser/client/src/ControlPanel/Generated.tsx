@@ -1,4 +1,4 @@
-import { ViewerContext } from "../App";
+import { ViewerContext } from "../ViewerContext";
 import { useThrottledMessageSender } from "../WebsocketFunctions";
 import { GuiComponentContext } from "./GuiComponentContext";
 
@@ -22,22 +22,24 @@ import FolderComponent from "../components/Folder";
 import MultiSliderComponent from "../components/MultiSlider";
 import UploadButtonComponent from "../components/UploadButton";
 import ProgressBarComponent from "../components/ProgressBar";
+import ImageComponent from "../components/Image";
+import HtmlComponent from "../components/Html";
 
 /** Root of generated inputs. */
 export default function GeneratedGuiContainer({
-  containerId,
+  containerUuid,
 }: {
-  containerId: string;
+  containerUuid: string;
 }) {
   const viewer = React.useContext(ViewerContext)!;
   const updateGuiProps = viewer.useGui((state) => state.updateGuiProps);
   const messageSender = useThrottledMessageSender(50);
 
-  function setValue(id: string, value: NonNullable<unknown>) {
-    updateGuiProps(id, { value: value });
+  function setValue(uuid: string, value: NonNullable<unknown>) {
+    updateGuiProps(uuid, { value: value });
     messageSender({
       type: "GuiUpdateMessage",
-      id: id,
+      uuid: uuid,
       updates: { value: value },
     });
   }
@@ -50,31 +52,35 @@ export default function GeneratedGuiContainer({
         setValue: setValue,
       }}
     >
-      <GuiContainer containerId={containerId} />
+      <GuiContainer containerUuid={containerUuid} />
     </GuiComponentContext.Provider>
   );
 }
 
-function GuiContainer({ containerId }: { containerId: string }) {
+function GuiContainer({ containerUuid }: { containerUuid: string }) {
   const viewer = React.useContext(ViewerContext)!;
 
   const guiIdSet =
-    viewer.useGui((state) => state.guiIdSetFromContainerId[containerId]) ?? {};
+    viewer.useGui(
+      (state) => state.guiUuidSetFromContainerUuid[containerUuid],
+    ) ?? {};
 
   // Render each GUI element in this container.
   const guiIdArray = [...Object.keys(guiIdSet)];
-  const guiOrderFromId = viewer!.useGui((state) => state.guiOrderFromId);
+  const guiOrderFromId = viewer!.useGui((state) => state.guiOrderFromUuid);
   if (guiIdSet === undefined) return null;
 
-  let guiIdOrderPairArray = guiIdArray.map((id) => ({
-    id: id,
-    order: guiOrderFromId[id],
+  let guiUuidOrderPairArray = guiIdArray.map((uuid) => ({
+    uuid: uuid,
+    order: guiOrderFromId[uuid],
   }));
-  guiIdOrderPairArray = guiIdOrderPairArray.sort((a, b) => a.order - b.order);
+  guiUuidOrderPairArray = guiUuidOrderPairArray.sort(
+    (a, b) => a.order - b.order,
+  );
   const out = (
     <Box pt="xs">
-      {guiIdOrderPairArray.map((pair) => (
-        <GeneratedInput key={pair.id} guiId={pair.id} />
+      {guiUuidOrderPairArray.map((pair) => (
+        <GeneratedInput key={pair.uuid} guiUuid={pair.uuid} />
       ))}
     </Box>
   );
@@ -82,45 +88,53 @@ function GuiContainer({ containerId }: { containerId: string }) {
 }
 
 /** A single generated GUI element. */
-function GeneratedInput(props: { guiId: string }) {
+function GeneratedInput(props: { guiUuid: string }) {
   const viewer = React.useContext(ViewerContext)!;
-  const conf = viewer.useGui((state) => state.guiConfigFromId[props.guiId]);
+  const conf = viewer.useGui((state) => state.guiConfigFromUuid[props.guiUuid]);
+  if (conf === undefined) {
+    console.error("Tried to render non-existent component", props.guiUuid);
+    return null;
+  }
   switch (conf.type) {
-    case "GuiAddFolderMessage":
+    case "GuiFolderMessage":
       return <FolderComponent {...conf} />;
-    case "GuiAddTabGroupMessage":
+    case "GuiTabGroupMessage":
       return <TabGroupComponent {...conf} />;
-    case "GuiAddMarkdownMessage":
+    case "GuiMarkdownMessage":
       return <MarkdownComponent {...conf} />;
-    case "GuiAddPlotlyMessage":
+    case "GuiHtmlMessage":
+      return <HtmlComponent {...conf} />;
+    case "GuiPlotlyMessage":
       return <PlotlyComponent {...conf} />;
-    case "GuiAddButtonMessage":
+    case "GuiImageMessage":
+      return <ImageComponent {...conf} />;
+    case "GuiButtonMessage":
       return <ButtonComponent {...conf} />;
-    case "GuiAddUploadButtonMessage":
+    case "GuiUploadButtonMessage":
       return <UploadButtonComponent {...conf} />;
-    case "GuiAddSliderMessage":
+    case "GuiSliderMessage":
       return <SliderComponent {...conf} />;
-    case "GuiAddMultiSliderMessage":
+    case "GuiMultiSliderMessage":
       return <MultiSliderComponent {...conf} />;
-    case "GuiAddNumberMessage":
+    case "GuiNumberMessage":
       return <NumberInputComponent {...conf} />;
-    case "GuiAddTextMessage":
+    case "GuiTextMessage":
       return <TextInputComponent {...conf} />;
-    case "GuiAddCheckboxMessage":
+    case "GuiCheckboxMessage":
       return <CheckboxComponent {...conf} />;
-    case "GuiAddVector2Message":
+    case "GuiVector2Message":
       return <Vector2Component {...conf} />;
-    case "GuiAddVector3Message":
+    case "GuiVector3Message":
       return <Vector3Component {...conf} />;
-    case "GuiAddDropdownMessage":
+    case "GuiDropdownMessage":
       return <DropdownComponent {...conf} />;
-    case "GuiAddRgbMessage":
+    case "GuiRgbMessage":
       return <RgbComponent {...conf} />;
-    case "GuiAddRgbaMessage":
+    case "GuiRgbaMessage":
       return <RgbaComponent {...conf} />;
-    case "GuiAddButtonGroupMessage":
+    case "GuiButtonGroupMessage":
       return <ButtonGroupComponent {...conf} />;
-    case "GuiAddProgressBarMessage":
+    case "GuiProgressBarMessage":
       return <ProgressBarComponent {...conf} />;
     default:
       assertNeverType(conf);

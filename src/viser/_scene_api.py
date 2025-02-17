@@ -1,39 +1,52 @@
 from __future__ import annotations
 
+import asyncio
 import io
 import time
 import warnings
+from collections.abc import Coroutine
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Callable, Tuple, TypeVar, Union, cast, get_args
 
 import imageio.v3 as iio
-import numpy as onp
-import numpy.typing as onpt
+import numpy as np
 from typing_extensions import Literal, ParamSpec, TypeAlias, assert_never
 
 from . import _messages
 from . import transforms as tf
 from ._scene_handles import (
+    AmbientLightHandle,
     BatchedAxesHandle,
     BoneState,
     CameraFrustumHandle,
+    DirectionalLightHandle,
     FrameHandle,
     GaussianSplatHandle,
     GlbHandle,
+    GridHandle,
     Gui3dContainerHandle,
+    HemisphereLightHandle,
     ImageHandle,
     LabelHandle,
+    LineSegmentsHandle,
     MeshHandle,
     MeshSkinnedBoneHandle,
     MeshSkinnedHandle,
     PointCloudHandle,
+    PointLightHandle,
+    RectAreaLightHandle,
     SceneNodeHandle,
     SceneNodePointerEvent,
     ScenePointerEvent,
+    SplineCatmullRomHandle,
+    SplineCubicBezierHandle,
+    SpotLightHandle,
     TransformControlsHandle,
-    _SceneNodeHandleState,
+    _ClickableSceneNodeHandle,
     _TransformControlsState,
+    colors_to_uint8,
 )
+from ._threadpool_exceptions import print_threadpool_errors
 
 if TYPE_CHECKING:
     import trimesh
@@ -45,45 +58,36 @@ if TYPE_CHECKING:
 P = ParamSpec("P")
 
 
-def _colors_to_uint8(colors: onp.ndarray) -> onpt.NDArray[onp.uint8]:
-    """Convert intensity values to uint8. We assume the range [0,1] for floats, and
-    [0,255] for integers. Accepts any shape."""
-    if colors.dtype != onp.uint8:
-        if onp.issubdtype(colors.dtype, onp.floating):
-            colors = onp.clip(colors * 255.0, 0, 255).astype(onp.uint8)
-        if onp.issubdtype(colors.dtype, onp.integer):
-            colors = onp.clip(colors, 0, 255).astype(onp.uint8)
-    return colors
-
-
 RgbTupleOrArray: TypeAlias = Union[
-    Tuple[int, int, int], Tuple[float, float, float], onp.ndarray
+    Tuple[int, int, int], Tuple[float, float, float], np.ndarray
 ]
 
+NoneOrCoroutine = TypeVar("NoneOrCoroutine", None, Coroutine)
 
-def _encode_rgb(rgb: RgbTupleOrArray) -> int:
-    if isinstance(rgb, onp.ndarray):
+
+def _encode_rgb(rgb: RgbTupleOrArray) -> tuple[int, int, int]:
+    if isinstance(rgb, np.ndarray):
         assert rgb.shape == (3,)
     rgb_fixed = tuple(
-        value if onp.issubdtype(type(value), onp.integer) else int(value * 255)
+        int(value) if np.issubdtype(type(value), np.integer) else int(value * 255)
         for value in rgb
     )
     assert len(rgb_fixed) == 3
-    return int(rgb_fixed[0] * (256**2) + rgb_fixed[1] * 256 + rgb_fixed[2])
+    return rgb_fixed  # type: ignore
 
 
 def _encode_image_binary(
-    image: onp.ndarray,
-    format: Literal["png", "jpeg"],
+    image: np.ndarray,
+    format: Literal["png", "jpeg", "image/png", "image/jpeg"],
     jpeg_quality: int | None = None,
 ) -> tuple[Literal["image/png", "image/jpeg"], bytes]:
     media_type: Literal["image/png", "image/jpeg"]
-    image = _colors_to_uint8(image)
+    image = colors_to_uint8(image)
     with io.BytesIO() as data_buffer:
-        if format == "png":
+        if format in ("png", "image/png"):
             media_type = "image/png"
             iio.imwrite(data_buffer, image, extension=".png")
-        elif format == "jpeg":
+        elif format in ("jpeg", "image/jpeg"):
             media_type = "image/jpeg"
             iio.imwrite(
                 data_buffer,
@@ -100,11 +104,11 @@ def _encode_image_binary(
 TVector = TypeVar("TVector", bound=tuple)
 
 
-def cast_vector(vector: TVector | onp.ndarray, length: int) -> TVector:
+def cast_vector(vector: TVector | np.ndarray, length: int) -> TVector:
     if not isinstance(vector, tuple):
-        assert cast(onp.ndarray, vector).shape == (
-            length,
-        ), f"Expected vector of shape {(length,)}, but got {vector.shape} instead"
+        assert cast(np.ndarray, vector).shape == (length,), (
+            f"Expected vector of shape {(length,)}, but got {vector.shape} instead"
+        )
     return cast(TVector, tuple(map(float, vector)))
 
 
@@ -118,8 +122,12 @@ class SceneApi:
         self,
         owner: ViserServer | ClientHandle,  # Who do I belong to?
         thread_executor: ThreadPoolExecutor,
+        event_loop: asyncio.AbstractEventLoop,
     ) -> None:
         from ._viser import ViserServer
+
+        self._thread_executor = thread_executor
+        self._event_loop = event_loop
 
         self._owner = owner
         """Entity that owns this API."""
@@ -131,28 +139,25 @@ class SceneApi:
         )
         """Interface for sending and listening to messages."""
 
-        self.world_axes: FrameHandle = FrameHandle(
-            _SceneNodeHandleState(
-                "/WorldAxes",
-                self,
-                wxyz=onp.array([1.0, 0.0, 0.0, 0.0]),
-                position=onp.zeros(3),
-            )
-        )
-        """Handle for the world axes, which are created by default."""
-
-        # Hide world axes on initialization.
-        if isinstance(owner, ViserServer):
-            self.world_axes.visible = False
-
         self._handle_from_transform_controls_name: dict[
             str, TransformControlsHandle
         ] = {}
         self._handle_from_node_name: dict[str, SceneNodeHandle] = {}
 
-        self._scene_pointer_cb: Callable[[ScenePointerEvent], None] | None = None
-        self._scene_pointer_done_cb: Callable[[], None] = lambda: None
+        self._scene_pointer_cb: (
+            Callable[[ScenePointerEvent], None | Coroutine] | None
+        ) = None
+        self._scene_pointer_done_cb: Callable[[], None | Coroutine] = lambda: None
         self._scene_pointer_event_type: _messages.ScenePointerEventType | None = None
+
+        # Set up world axes handle.
+        self.world_axes: FrameHandle = self.add_frame(
+            "/WorldAxes",
+            axes_radius=0.0125,
+        )
+        """Handle for the world axes, which are created by default."""
+
+        self.world_axes.visible = False
 
         self._websock_interface.register_handler(
             _messages.TransformControlsUpdateMessage,
@@ -167,17 +172,20 @@ class SceneApi:
             self._handle_scene_pointer_updates,
         )
 
-        self._thread_executor = thread_executor
-
     def set_up_direction(
         self,
         direction: Literal["+x", "+y", "+z", "-x", "-y", "-z"]
         | tuple[float, float, float]
-        | onp.ndarray,
+        | np.ndarray,
     ) -> None:
         """Set the global up direction of the scene. By default we follow +Z-up
         (similar to Blender, 3DS Max, ROS, etc), the most common alternative is
         +Y (OpenGL, Maya, etc).
+
+        In practice, the impact of this can improve (1) the ergonomics of
+        camera controls, which will default to the same up direction as the
+        scene, and (2) lighting, because the default lights and environment map
+        are oriented to match the scene's up direction.
 
         Args:
             direction: New up direction. Can either be a string (one of +x, +y,
@@ -194,20 +202,20 @@ class SceneApi:
             }[direction]
         assert not isinstance(direction, str)
 
-        default_three_up = onp.array([0.0, 1.0, 0.0])
-        direction = onp.asarray(direction)
+        default_three_up = np.array([0.0, 1.0, 0.0])
+        direction = np.asarray(direction)
 
-        def rotate_between(before: onp.ndarray, after: onp.ndarray) -> tf.SO3:
+        def rotate_between(before: np.ndarray, after: np.ndarray) -> tf.SO3:
             assert before.shape == after.shape == (3,)
-            before = before / onp.linalg.norm(before)
-            after = after / onp.linalg.norm(after)
+            before = before / np.linalg.norm(before)
+            after = after / np.linalg.norm(after)
 
-            angle = onp.arccos(onp.clip(onp.dot(before, after), -1, 1))
-            axis = onp.cross(before, after)
-            if onp.allclose(axis, onp.zeros(3), rtol=1e-3, atol=1e-5):
-                unit_vector = onp.arange(3) == onp.argmin(onp.abs(before))
-                axis = onp.cross(before, unit_vector)
-            axis = axis / onp.linalg.norm(axis)
+            angle = np.arccos(np.clip(np.dot(before, after), -1, 1))
+            axis = np.cross(before, after)
+            if np.allclose(axis, np.zeros(3), rtol=1e-3, atol=1e-5):
+                unit_vector = np.arange(3) == np.argmin(np.abs(before))
+                axis = np.cross(before, unit_vector)
+            axis = axis / np.linalg.norm(axis)
             return tf.SO3.exp(angle * axis)
 
         R_threeworld_world = rotate_between(direction, default_three_up)
@@ -217,21 +225,21 @@ class SceneApi:
         #     If we set +Z to up, +X and +Y should face the camera.
         # In App.tsx, the camera is initialized at [-3, 3, -3] in the threejs
         # coordinate frame.
-        desired_fwd = onp.array([-1.0, 0.0, -1.0]) / onp.sqrt(2.0)
-        current_fwd = R_threeworld_world @ (onp.ones(3) / onp.sqrt(3.0))
-        current_fwd = current_fwd * onp.array([1.0, 0.0, 1.0])
-        current_fwd = current_fwd / onp.linalg.norm(current_fwd)
+        desired_fwd = np.array([-1.0, 0.0, -1.0]) / np.sqrt(2.0)
+        current_fwd = R_threeworld_world @ (np.ones(3) / np.sqrt(3.0))
+        current_fwd = current_fwd * np.array([1.0, 0.0, 1.0])
+        current_fwd = current_fwd / np.linalg.norm(current_fwd)
         R_threeworld_world = (
             tf.SO3.from_y_radians(  # Rotate around the null space / up direction.
-                onp.arctan2(
-                    onp.cross(current_fwd, desired_fwd)[1],
-                    onp.dot(current_fwd, desired_fwd),
+                np.arctan2(
+                    np.cross(current_fwd, desired_fwd)[1],
+                    np.dot(current_fwd, desired_fwd),
                 ),
             )
             @ R_threeworld_world
         )
 
-        if not onp.any(onp.isnan(R_threeworld_world.wxyz)):
+        if not np.any(np.isnan(R_threeworld_world.wxyz)):
             # Set the orientation of the root node.
             self._websock_interface.queue_message(
                 _messages.SetOrientationMessage(
@@ -254,13 +262,312 @@ class SceneApi:
             _messages.SetSceneNodeVisibilityMessage("", visible)
         )
 
+    def add_light_directional(
+        self,
+        name: str,
+        color: Tuple[int, int, int] = (255, 255, 255),
+        intensity: float = 1.0,
+        cast_shadow: bool = False,
+        wxyz: tuple[float, float, float, float] | np.ndarray = (1.0, 0.0, 0.0, 0.0),
+        position: tuple[float, float, float] = (0.0, 0.0, 0.0),
+        visible: bool = True,
+    ) -> DirectionalLightHandle:
+        """
+        Add a directional light to the scene.
+
+        Args:
+            name: A scene tree name. Names in the format of /parent/child can be used to
+                define a kinematic tree.
+            color: Color of the light.
+            intensity: Light's strength/intensity.
+            cast_shadow: If set to true light will cast dynamic shadows
+            wxyz: Quaternion rotation to parent frame from local frame (R_pl).
+            position: Translation to parent frame from local frame (t_pl).
+            visible: Whether or not this scene node is initially visible.
+
+        Returns:
+            Handle for manipulating scene node.
+        """
+
+        message = _messages.DirectionalLightMessage(
+            name, _messages.DirectionalLightProps(color, intensity, cast_shadow)
+        )
+        return DirectionalLightHandle._make(
+            self, message, name, wxyz, position, visible
+        )
+
+    def add_light_ambient(
+        self,
+        name: str,
+        color: Tuple[int, int, int] = (255, 255, 255),
+        intensity: float = 1.0,
+        wxyz: tuple[float, float, float, float] | np.ndarray = (1.0, 0.0, 0.0, 0.0),
+        position: tuple[float, float, float] | np.ndarray = (0.0, 0.0, 0.0),
+        visible: bool = True,
+    ) -> AmbientLightHandle:
+        """
+        Add an ambient light to the scene.
+
+        Args:
+            name: A scene tree name. Names in the format of /parent/child can be used to
+                define a kinematic tree.
+            color: Color of the light.
+            intensity: Light's strength/intensity.
+            wxyz: Quaternion rotation to parent frame from local frame (R_pl).
+            position: Translation to parent frame from local frame (t_pl).
+            visible: Whether or not this scene node is initially visible.
+
+        Returns:
+            Handle for manipulating scene node.
+        """
+
+        message = _messages.AmbientLightMessage(
+            name, _messages.AmbientLightProps(color, intensity)
+        )
+        return AmbientLightHandle._make(self, message, name, wxyz, position, visible)
+
+    def add_light_hemisphere(
+        self,
+        name: str,
+        sky_color: Tuple[int, int, int] = (255, 255, 255),
+        ground_color: Tuple[int, int, int] = (255, 255, 255),
+        intensity: float = 1.0,
+        wxyz: tuple[float, float, float, float] | np.ndarray = (1.0, 0.0, 0.0, 0.0),
+        position: tuple[float, float, float] = (0.0, 0.0, 0.0),
+        visible: bool = True,
+    ) -> HemisphereLightHandle:
+        """
+        Add a hemisphere light to the scene.
+
+        Args:
+            name: A scene tree name. Names in the format of /parent/child can be used to
+                define a kinematic tree.
+            sky_color: The light's sky color.
+            ground_color: The light's ground color.
+            intensity: Light's strength/intensity.
+            wxyz: Quaternion rotation to parent frame from local frame (R_pl).
+            position: Translation to parent frame from local frame (t_pl).
+            visible: Whether or not this scene node is initially visible.
+
+        Returns:
+            Handle for manipulating scene node.
+        """
+
+        message = _messages.HemisphereLightMessage(
+            name, _messages.HemisphereLightProps(sky_color, ground_color, intensity)
+        )
+        return HemisphereLightHandle._make(self, message, name, wxyz, position, visible)
+
+    def add_light_point(
+        self,
+        name: str,
+        color: Tuple[int, int, int] = (255, 255, 255),
+        intensity: float = 1.0,
+        distance: float = 0.0,
+        decay: float = 2.0,
+        cast_shadow: bool = False,
+        wxyz: tuple[float, float, float, float] | np.ndarray = (1.0, 0.0, 0.0, 0.0),
+        position: tuple[float, float, float] = (0.0, 0.0, 0.0),
+        visible: bool = True,
+    ) -> PointLightHandle:
+        """
+        Add a point light to the scene.
+
+        Args:
+            name: A scene tree name. Names in the format of /parent/child can be used to
+                define a kinematic tree.
+            color: Color of the light.
+            intensity: Light's strength/intensity.
+            distance: Maximum distance of light.
+            decay: The amount the light dims along the distance of the light.
+            cast_shadow: If set to true light will cast dynamic shadows
+            wxyz: Quaternion rotation to parent frame from local frame (R_pl).
+            position: Translation to parent frame from local frame (t_pl).
+            visible: Whether or not this scene node is initially visible.
+
+        Returns:
+            Handle for manipulating scene node.
+        """
+
+        message = _messages.PointLightMessage(
+            name,
+            _messages.PointLightProps(
+                color=color,
+                intensity=intensity,
+                distance=distance,
+                decay=decay,
+                cast_shadow=cast_shadow,
+            ),
+        )
+        return PointLightHandle._make(self, message, name, wxyz, position, visible)
+
+    def add_light_rectarea(
+        self,
+        name: str,
+        color: Tuple[int, int, int] = (255, 255, 255),
+        intensity: float = 1.0,
+        width: float = 10.0,
+        height: float = 10.0,
+        wxyz: tuple[float, float, float, float] | np.ndarray = (1.0, 0.0, 0.0, 0.0),
+        position: tuple[float, float, float] = (0.0, 0.0, 0.0),
+        visible: bool = True,
+    ) -> RectAreaLightHandle:
+        """
+        Add a rectangular area light to the scene.
+
+        Args:
+            name: A scene tree name. Names in the format of /parent/child can be used to
+                define a kinematic tree.
+            color: Color of the light.
+            intensity: Light's strength/intensity.
+            width: The width of the light.
+            height: The height of the light.
+            wxyz: Quaternion rotation to parent frame from local frame (R_pl).
+            position: Translation to parent frame from local frame (t_pl).
+            visible: Whether or not this scene node is initially visible.
+
+        Returns:
+            Handle for manipulating scene node.
+        """
+
+        message = _messages.RectAreaLightMessage(
+            name=name,
+            props=_messages.RectAreaLightProps(
+                color=color,
+                intensity=intensity,
+                width=width,
+                height=height,
+            ),
+        )
+        return RectAreaLightHandle._make(self, message, name, wxyz, position, visible)
+
+    def add_light_spot(
+        self,
+        name: str,
+        color: Tuple[int, int, int] = (255, 255, 255),
+        distance: float = 0.0,
+        angle: float = np.pi / 3,
+        penumbra: float = 0.0,
+        decay: float = 2.0,
+        intensity: float = 1.0,
+        cast_shadow: bool = False,
+        wxyz: tuple[float, float, float, float] | np.ndarray = (1.0, 0.0, 0.0, 0.0),
+        position: tuple[float, float, float] = (0.0, 0.0, 0.0),
+        visible: bool = True,
+    ) -> SpotLightHandle:
+        """
+        Add a spot light to the scene.
+
+        Args:
+            name: A scene tree name. Names in the format of /parent/child can be used to
+                define a kinematic tree.
+            color: Color of the light.
+            distance: Maximum distance of light.
+            angle: Maximum extent of the spotlight, in radians, from its direction.
+                Should be no more than Math.PI/2.
+            penumbra: Percent of the spotlight cone that is attenuated due to penumbra.
+                Between 0 and 1.
+            decay: The amount the light dims along the distance of the light.
+            intensity: Light's strength/intensity.
+            cast_shadow: If set to true light will cast dynamic shadows
+            wxyz: Quaternion rotation to parent frame from local frame (R_pl).
+            position: Translation to parent frame from local frame (t_pl).
+            visible: Whether or not this scene node is initially visible.
+
+        Returns:
+            Handle for manipulating scene node.
+        """
+
+        message = _messages.SpotLightMessage(
+            name,
+            _messages.SpotLightProps(
+                color, intensity, distance, angle, penumbra, decay, cast_shadow
+            ),
+        )
+        return SpotLightHandle._make(self, message, name, wxyz, position, visible)
+
+    def set_environment_map(
+        self,
+        hdri: None
+        | Literal[
+            "apartment",
+            "city",
+            "dawn",
+            "forest",
+            "lobby",
+            "night",
+            "park",
+            "studio",
+            "sunset",
+            "warehouse",
+        ] = "warehouse",
+        background: bool = False,
+        background_blurriness: float = 0.0,
+        background_intensity: float = 1.0,
+        background_wxyz: tuple[float, float, float, float] | np.ndarray = (
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+        ),
+        environment_intensity: float = 1.0,
+        environment_wxyz: tuple[float, float, float, float] | np.ndarray = (
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+        ),
+    ) -> None:
+        """Set the environment map for the scene. This will set some lights and background.
+
+        Args:
+            hdri: Preset HDRI environment to use.
+            background: Show or hide the environment map in the background.
+            background_blurriness: Blur factor of the environment map background (0-1).
+            background_intensity: Intensity of the background.
+            background_wxyz: Orientation of the background.
+            environment_intensity: Intensity of the environment lighting.
+            environment_wxyz: Orientation of the environment lighting.
+        """
+        self._websock_interface.queue_message(
+            _messages.EnvironmentMapMessage(
+                hdri=hdri,
+                background=background,
+                background_blurriness=background_blurriness,
+                background_intensity=background_intensity,
+                background_wxyz=cast_vector(background_wxyz, 4),
+                environment_intensity=environment_intensity,
+                environment_wxyz=cast_vector(environment_wxyz, 4),
+            )
+        )
+
+    def enable_default_lights(
+        self,
+        enabled: bool = True,
+        cast_shadow: bool = False,
+    ) -> None:
+        """Enable/disable the default lights in the scene. If not otherwise
+        specified, default lighting will be enabled.
+
+        This does not affect lighting from the environment map. To turn these off,
+        see :meth:`SceneApi.set_environment_map()`.
+
+        Args:
+            enabled: True if user wants default lighting. False if user does
+                not want default lighting.
+            cast_shadow:  If set to True light will cast dynamic shadows
+        """
+        self._websock_interface.queue_message(
+            _messages.EnableLightsMessage(enabled, cast_shadow)
+        )
+
     def add_glb(
         self,
         name: str,
         glb_data: bytes,
-        scale=1.0,
-        wxyz: tuple[float, float, float, float] | onp.ndarray = (1.0, 0.0, 0.0, 0.0),
-        position: tuple[float, float, float] | onp.ndarray = (0.0, 0.0, 0.0),
+        scale: float = 1.0,
+        wxyz: tuple[float, float, float, float] | np.ndarray = (1.0, 0.0, 0.0, 0.0),
+        position: tuple[float, float, float] | np.ndarray = (0.0, 0.0, 0.0),
         visible: bool = True,
     ) -> GlbHandle:
         """Add a general 3D asset via binary glTF (GLB).
@@ -283,29 +590,79 @@ class SceneApi:
         Returns:
             Handle for manipulating scene node.
         """
-        self._websock_interface.queue_message(
-            _messages.GlbMessage(name, glb_data, scale)
+        message = _messages.GlbMessage(name, _messages.GlbProps(glb_data, scale))
+        return GlbHandle._make(self, message, name, wxyz, position, visible)
+
+    def add_line_segments(
+        self,
+        name: str,
+        points: np.ndarray,
+        colors: np.ndarray | tuple[float, float, float],
+        line_width: float = 1,
+        wxyz: tuple[float, float, float, float] | np.ndarray = (1.0, 0.0, 0.0, 0.0),
+        position: tuple[float, float, float] | np.ndarray = (0.0, 0.0, 0.0),
+        visible: bool = True,
+    ) -> LineSegmentsHandle:
+        """Add line segments to the scene.
+
+        Args:
+            name: A scene tree name. Names in the format of /parent/child can
+                be used to define a kinematic tree.
+            points: A numpy array of shape (N, 2, 3) defining start/end points
+                for each of N line segments.
+            colors: Colors of points. Should have shape (N, 2, 3) or be
+                broadcastable to it.
+            line_width: Width of the lines.
+            wxyz: Quaternion rotation to parent frame from local frame (R_pl).
+            position: Translation to parent frame from local frame (t_pl).
+            visible: Whether or not these line segments are initially visible.
+
+        Returns:
+            Handle for manipulating scene node.
+        """
+        points_array = np.asarray(points, dtype=np.float32)
+        if (
+            points_array.shape[-1] != 3
+            or points_array.ndim != 3
+            or points_array.shape[1] != 2
+        ):
+            raise ValueError("Points should have shape (N, 2, 3) for N line segments.")
+
+        colors_array = colors_to_uint8(np.asarray(colors))
+        colors_array = np.broadcast_to(colors_array, points_array.shape)
+
+        message = _messages.LineSegmentsMessage(
+            name=name,
+            props=_messages.LineSegmentsProps(
+                points=points_array,
+                colors=colors_array,
+                line_width=line_width,
+            ),
         )
-        return GlbHandle._make(self, name, wxyz, position, visible)
+        return LineSegmentsHandle._make(self, message, name, wxyz, position, visible)
 
     def add_spline_catmull_rom(
         self,
         name: str,
-        positions: tuple[tuple[float, float, float], ...] | onp.ndarray,
+        # The naming inconsistency here compared to add_line_segments is unfortunate...
+        positions: tuple[tuple[float, float, float], ...] | np.ndarray,
         curve_type: Literal["centripetal", "chordal", "catmullrom"] = "centripetal",
         tension: float = 0.5,
         closed: bool = False,
         line_width: float = 1,
         color: RgbTupleOrArray = (20, 20, 20),
         segments: int | None = None,
-        wxyz: tuple[float, float, float, float] | onp.ndarray = (1.0, 0.0, 0.0, 0.0),
-        position: tuple[float, float, float] | onp.ndarray = (0.0, 0.0, 0.0),
+        wxyz: tuple[float, float, float, float] | np.ndarray = (1.0, 0.0, 0.0, 0.0),
+        position: tuple[float, float, float] | np.ndarray = (0.0, 0.0, 0.0),
         visible: bool = True,
-    ) -> SceneNodeHandle:
+    ) -> SplineCatmullRomHandle:
         """Add a spline to the scene using Catmull-Rom interpolation.
 
         This method creates a spline based on a set of positions and interpolates
         them using the Catmull-Rom algorithm. This can be used to create smooth curves.
+
+        If many splines are needed, it'll be more efficient to batch them in
+        :meth:`add_line_segments()`.
 
         Args:
             name: A scene tree name. Names in the format of /parent/child can be used to
@@ -324,14 +681,14 @@ class SceneApi:
         Returns:
             Handle for manipulating scene node.
         """
-        if isinstance(positions, onp.ndarray):
+        if isinstance(positions, np.ndarray):
             assert len(positions.shape) == 2 and positions.shape[1] == 3
             positions = tuple(map(tuple, positions))  # type: ignore
         assert len(positions[0]) == 3
         assert isinstance(positions, tuple)
-        self._websock_interface.queue_message(
-            _messages.CatmullRomSplineMessage(
-                name,
+        message = _messages.CatmullRomSplineMessage(
+            name,
+            _messages.CatmullRomSplineProps(
                 positions,
                 curve_type,
                 tension,
@@ -339,27 +696,32 @@ class SceneApi:
                 line_width,
                 _encode_rgb(color),
                 segments=segments,
-            )
+            ),
         )
-        return SceneNodeHandle._make(self, name, wxyz, position, visible)
+        return SplineCatmullRomHandle._make(
+            self, message, name, wxyz, position, visible
+        )
 
     def add_spline_cubic_bezier(
         self,
         name: str,
-        positions: tuple[tuple[float, float, float], ...] | onp.ndarray,
-        control_points: tuple[tuple[float, float, float], ...] | onp.ndarray,
-        line_width: float = 1,
+        positions: tuple[tuple[float, float, float], ...] | np.ndarray,
+        control_points: tuple[tuple[float, float, float], ...] | np.ndarray,
+        line_width: float = 1.0,
         color: RgbTupleOrArray = (20, 20, 20),
         segments: int | None = None,
-        wxyz: tuple[float, float, float, float] | onp.ndarray = (1.0, 0.0, 0.0, 0.0),
-        position: tuple[float, float, float] | onp.ndarray = (0.0, 0.0, 0.0),
+        wxyz: tuple[float, float, float, float] | np.ndarray = (1.0, 0.0, 0.0, 0.0),
+        position: tuple[float, float, float] | np.ndarray = (0.0, 0.0, 0.0),
         visible: bool = True,
-    ) -> SceneNodeHandle:
+    ) -> SplineCubicBezierHandle:
         """Add a spline to the scene using Cubic Bezier interpolation.
 
         This method allows for the creation of a cubic Bezier spline based on given
         positions and control points. It is useful for creating complex, smooth,
         curving shapes.
+
+        If many splines are needed, it'll be more efficient to batch them in
+        :meth:`add_line_segments()`.
 
         Args:
             name: A scene tree name. Names in the format of /parent/child can be used to
@@ -377,27 +739,29 @@ class SceneApi:
             Handle for manipulating scene node.
         """
 
-        if isinstance(positions, onp.ndarray):
+        if isinstance(positions, np.ndarray):
             assert len(positions.shape) == 2 and positions.shape[1] == 3
             positions = tuple(map(tuple, positions))  # type: ignore
-        if isinstance(control_points, onp.ndarray):
+        if isinstance(control_points, np.ndarray):
             assert len(control_points.shape) == 2 and control_points.shape[1] == 3
             control_points = tuple(map(tuple, control_points))  # type: ignore
 
         assert isinstance(positions, tuple)
         assert isinstance(control_points, tuple)
         assert len(control_points) == (2 * len(positions) - 2)
-        self._websock_interface.queue_message(
-            _messages.CubicBezierSplineMessage(
-                name,
+        message = _messages.CubicBezierSplineMessage(
+            name,
+            _messages.CubicBezierSplineProps(
                 positions,
                 control_points,
                 line_width,
                 _encode_rgb(color),
                 segments=segments,
-            )
+            ),
         )
-        return SceneNodeHandle._make(self, name, wxyz, position, visible)
+        return SplineCubicBezierHandle._make(
+            self, message, name, wxyz, position, visible
+        )
 
     def add_camera_frustum(
         self,
@@ -405,14 +769,15 @@ class SceneApi:
         fov: float,
         aspect: float,
         scale: float = 0.3,
+        line_width: float = 2.0,
         color: RgbTupleOrArray = (20, 20, 20),
-        image: onp.ndarray | None = None,
+        image: np.ndarray | None = None,
         format: Literal["png", "jpeg"] = "jpeg",
         jpeg_quality: int | None = None,
-        wxyz: tuple[float, float, float, float] | onp.ndarray = (1.0, 0.0, 0.0, 0.0),
-        position: tuple[float, float, float] | onp.ndarray = (0.0, 0.0, 0.0),
+        wxyz: tuple[float, float, float, float] | np.ndarray = (1.0, 0.0, 0.0, 0.0),
+        position: tuple[float, float, float] | np.ndarray = (0.0, 0.0, 0.0),
         visible: bool = True,
-        thickness: float = 1.0,
+        *_removed_kwargs,
     ) -> CameraFrustumHandle:
         """Add a camera frustum to the scene for visualization.
 
@@ -421,7 +786,7 @@ class SceneApi:
         and coverage of a camera in the 3D space.
 
         Like all cameras in the viser Python API, frustums follow the OpenCV [+Z forward,
-        +X right, +Y down] convention. fov is vertical in radians; aspect is width over height
+        +X right, +Y down] convention. fov is vertical in radians; aspect is width over height.
 
         Args:
             name: A scene tree name. Names in the format of /parent/child can be used to
@@ -429,6 +794,7 @@ class SceneApi:
             fov: Field of view of the camera (in radians).
             aspect: Aspect ratio of the camera (width over height).
             scale: Scale factor for the size of the frustum.
+            line_width: Width of the frustum lines, in screen space. Defaults to `2.0`.
             color: Color of the frustum as an RGB tuple.
             image: Optional image to be displayed on the frustum.
             format: Format of the provided image ('png' or 'jpeg').
@@ -441,6 +807,12 @@ class SceneApi:
             Handle for manipulating scene node.
         """
 
+        if "line_thickness" in _removed_kwargs:
+            warnings.warn(
+                "The 'line_thickness' argument has been removed. Please use 'line_width' instead. Note that the units have been changed from world space to screen space.",
+                DeprecationWarning,
+            )
+
         if image is not None:
             media_type, binary = _encode_image_binary(
                 image, format, jpeg_quality=jpeg_quality
@@ -449,20 +821,22 @@ class SceneApi:
             media_type = None
             binary = None
 
-        self._websock_interface.queue_message(
-            _messages.CameraFrustumMessage(
-                name=name,
+        message = _messages.CameraFrustumMessage(
+            name=name,
+            props=_messages.CameraFrustumProps(
                 fov=fov,
                 aspect=aspect,
                 scale=scale,
-                thickness=thickness,
-                # (255, 255, 255) => 0xffffff, etc
+                line_width=line_width,
                 color=_encode_rgb(color),
                 image_media_type=media_type,
-                image_binary=binary,
-            )
+                _image_data=binary,
+            ),
         )
-        return CameraFrustumHandle._make(self, name, wxyz, position, visible)
+        handle = CameraFrustumHandle._make(self, message, name, wxyz, position, visible)
+        handle._image = image
+        handle._jpeg_quality = jpeg_quality
+        return handle
 
     def add_frame(
         self,
@@ -471,8 +845,9 @@ class SceneApi:
         axes_length: float = 0.5,
         axes_radius: float = 0.025,
         origin_radius: float | None = None,
-        wxyz: tuple[float, float, float, float] | onp.ndarray = (1.0, 0.0, 0.0, 0.0),
-        position: tuple[float, float, float] | onp.ndarray = (0.0, 0.0, 0.0),
+        origin_color: RgbTupleOrArray = (236, 236, 0),
+        wxyz: tuple[float, float, float, float] | np.ndarray = (1.0, 0.0, 0.0, 0.0),
+        position: tuple[float, float, float] | np.ndarray = (0.0, 0.0, 0.0),
         visible: bool = True,
     ) -> FrameHandle:
         """Add a coordinate frame to the scene.
@@ -502,26 +877,27 @@ class SceneApi:
         """
         if origin_radius is None:
             origin_radius = axes_radius * 2
-        self._websock_interface.queue_message(
-            _messages.FrameMessage(
-                name=name,
+        message = _messages.FrameMessage(
+            name=name,
+            props=_messages.FrameProps(
                 show_axes=show_axes,
                 axes_length=axes_length,
                 axes_radius=axes_radius,
                 origin_radius=origin_radius,
-            )
+                origin_color=_encode_rgb(origin_color),
+            ),
         )
-        return FrameHandle._make(self, name, wxyz, position, visible)
+        return FrameHandle._make(self, message, name, wxyz, position, visible)
 
     def add_batched_axes(
         self,
         name: str,
-        batched_wxyzs: tuple[tuple[float, float, float, float], ...] | onp.ndarray,
-        batched_positions: tuple[tuple[float, float, float], ...] | onp.ndarray,
+        batched_wxyzs: tuple[tuple[float, float, float, float], ...] | np.ndarray,
+        batched_positions: tuple[tuple[float, float, float], ...] | np.ndarray,
         axes_length: float = 0.5,
         axes_radius: float = 0.025,
-        wxyz: tuple[float, float, float, float] | onp.ndarray = (1.0, 0.0, 0.0, 0.0),
-        position: tuple[float, float, float] | onp.ndarray = (0.0, 0.0, 0.0),
+        wxyz: tuple[float, float, float, float] | np.ndarray = (1.0, 0.0, 0.0, 0.0),
+        position: tuple[float, float, float] | np.ndarray = (0.0, 0.0, 0.0),
         visible: bool = True,
     ) -> BatchedAxesHandle:
         """Visualize batched sets of coordinate frame axes.
@@ -552,22 +928,23 @@ class SceneApi:
         Returns:
             Handle for manipulating scene node.
         """
-        batched_wxyzs = onp.asarray(batched_wxyzs)
-        batched_positions = onp.asarray(batched_positions)
+        batched_wxyzs = np.asarray(batched_wxyzs)
+        batched_positions = np.asarray(batched_positions)
 
         num_axes = batched_wxyzs.shape[0]
         assert batched_wxyzs.shape == (num_axes, 4)
         assert batched_positions.shape == (num_axes, 3)
-        self._websock_interface.queue_message(
-            _messages.BatchedAxesMessage(
-                name=name,
-                wxyzs_batched=batched_wxyzs.astype(onp.float32),
-                positions_batched=batched_positions.astype(onp.float32),
-                axes_length=axes_length,
-                axes_radius=axes_radius,
-            )
+        props = _messages.BatchedAxesProps(
+            wxyzs_batched=batched_wxyzs.astype(np.float32),
+            positions_batched=batched_positions.astype(np.float32),
+            axes_length=axes_length,
+            axes_radius=axes_radius,
         )
-        return BatchedAxesHandle._make(self, name, wxyz, position, visible)
+        message = _messages.BatchedAxesMessage(
+            name=name,
+            props=props,
+        )
+        return BatchedAxesHandle._make(self, message, name, wxyz, position, visible)
 
     def add_grid(
         self,
@@ -583,10 +960,11 @@ class SceneApi:
         section_color: RgbTupleOrArray = (140, 140, 140),
         section_thickness: float = 1.0,
         section_size: float = 1.0,
-        wxyz: tuple[float, float, float, float] | onp.ndarray = (1.0, 0.0, 0.0, 0.0),
-        position: tuple[float, float, float] | onp.ndarray = (0.0, 0.0, 0.0),
+        shadow_opacity: float = 0.15,
+        wxyz: tuple[float, float, float, float] | np.ndarray = (1.0, 0.0, 0.0, 0.0),
+        position: tuple[float, float, float] | np.ndarray = (0.0, 0.0, 0.0),
         visible: bool = True,
-    ) -> SceneNodeHandle:
+    ) -> GridHandle:
         """Add a 2D grid to the scene.
 
         This can be useful as a size, orientation, or ground plane reference.
@@ -604,6 +982,7 @@ class SceneApi:
             section_color: Color of the grid sections as an RGB tuple.
             section_thickness: Thickness of the section lines.
             section_size: Size of each section in the grid.
+            shadow_opacity: Opacity of shadows casted onto grid plane, 0: no shadows, 1: black shadows
             wxyz: Quaternion rotation to parent frame from local frame (R_pl).
             position: Translation to parent frame from local frame (t_pl).
             visible: Whether or not this scene node is initially visible.
@@ -611,9 +990,9 @@ class SceneApi:
         Returns:
             Handle for manipulating scene node.
         """
-        self._websock_interface.queue_message(
-            _messages.GridMessage(
-                name=name,
+        message = _messages.GridMessage(
+            name=name,
+            props=_messages.GridProps(
                 width=width,
                 height=height,
                 width_segments=width_segments,
@@ -625,16 +1004,17 @@ class SceneApi:
                 section_color=_encode_rgb(section_color),
                 section_thickness=section_thickness,
                 section_size=section_size,
-            )
+                shadow_opacity=shadow_opacity,
+            ),
         )
-        return SceneNodeHandle._make(self, name, wxyz, position, visible)
+        return GridHandle._make(self, message, name, wxyz, position, visible)
 
     def add_label(
         self,
         name: str,
         text: str,
-        wxyz: tuple[float, float, float, float] | onp.ndarray = (1.0, 0.0, 0.0, 0.0),
-        position: tuple[float, float, float] | onp.ndarray = (0.0, 0.0, 0.0),
+        wxyz: tuple[float, float, float, float] | np.ndarray = (1.0, 0.0, 0.0, 0.0),
+        position: tuple[float, float, float] | np.ndarray = (0.0, 0.0, 0.0),
         visible: bool = True,
     ) -> LabelHandle:
         """Add a 2D label to the scene.
@@ -652,20 +1032,20 @@ class SceneApi:
         Returns:
             Handle for manipulating scene node.
         """
-        self._websock_interface.queue_message(_messages.LabelMessage(name, text))
-        return LabelHandle._make(self, name, wxyz, position, visible=visible)
+        message = _messages.LabelMessage(name, _messages.LabelProps(text))
+        return LabelHandle._make(self, message, name, wxyz, position, visible=visible)
 
     def add_point_cloud(
         self,
         name: str,
-        points: onp.ndarray,
-        colors: onp.ndarray | tuple[float, float, float],
+        points: np.ndarray,
+        colors: np.ndarray | tuple[float, float, float],
         point_size: float = 0.1,
         point_shape: Literal[
             "square", "diamond", "circle", "rounded", "sparkle"
         ] = "square",
-        wxyz: tuple[float, float, float, float] | onp.ndarray = (1.0, 0.0, 0.0, 0.0),
-        position: tuple[float, float, float] | onp.ndarray = (0.0, 0.0, 0.0),
+        wxyz: tuple[float, float, float, float] | np.ndarray = (1.0, 0.0, 0.0, 0.0),
+        position: tuple[float, float, float] | np.ndarray = (0.0, 0.0, 0.0),
         visible: bool = True,
     ) -> PointCloudHandle:
         """Add a point cloud to the scene.
@@ -683,22 +1063,22 @@ class SceneApi:
         Returns:
             Handle for manipulating scene node.
         """
-        colors_cast = _colors_to_uint8(onp.asarray(colors))
-        assert (
-            len(points.shape) == 2 and points.shape[-1] == 3
-        ), "Shape of points should be (N, 3)."
+        colors_cast = colors_to_uint8(np.asarray(colors))
+        assert len(points.shape) == 2 and points.shape[-1] == 3, (
+            "Shape of points should be (N, 3)."
+        )
         assert colors_cast.shape in {
             points.shape,
             (3,),
         }, "Shape of colors should be (N, 3) or (3,)."
 
         if colors_cast.shape == (3,):
-            colors_cast = onp.tile(colors_cast[None, :], reps=(points.shape[0], 1))
+            colors_cast = np.tile(colors_cast[None, :], reps=(points.shape[0], 1))
 
-        self._websock_interface.queue_message(
-            _messages.PointCloudMessage(
-                name=name,
-                points=points.astype(onp.float32),
+        message = _messages.PointCloudMessage(
+            name=name,
+            props=_messages.PointCloudProps(
+                points=points.astype(np.float16),
                 colors=colors_cast,
                 point_size=point_size,
                 point_ball_norm={
@@ -708,26 +1088,26 @@ class SceneApi:
                     "rounded": 3.0,
                     "sparkle": 0.6,
                 }[point_shape],
-            )
+            ),
         )
-        return PointCloudHandle._make(self, name, wxyz, position, visible)
+        return PointCloudHandle._make(self, message, name, wxyz, position, visible)
 
     def add_mesh_skinned(
         self,
         name: str,
-        vertices: onp.ndarray,
-        faces: onp.ndarray,
-        bone_wxyzs: tuple[tuple[float, float, float, float], ...] | onp.ndarray,
-        bone_positions: tuple[tuple[float, float, float], ...] | onp.ndarray,
-        skin_weights: onp.ndarray,
+        vertices: np.ndarray,
+        faces: np.ndarray,
+        bone_wxyzs: tuple[tuple[float, float, float, float], ...] | np.ndarray,
+        bone_positions: tuple[tuple[float, float, float], ...] | np.ndarray,
+        skin_weights: np.ndarray,
         color: RgbTupleOrArray = (90, 200, 255),
         wireframe: bool = False,
         opacity: float | None = None,
         material: Literal["standard", "toon3", "toon5"] = "standard",
         flat_shading: bool = False,
         side: Literal["front", "back", "double"] = "front",
-        wxyz: Tuple[float, float, float, float] | onp.ndarray = (1.0, 0.0, 0.0, 0.0),
-        position: Tuple[float, float, float] | onp.ndarray = (0.0, 0.0, 0.0),
+        wxyz: Tuple[float, float, float, float] | np.ndarray = (1.0, 0.0, 0.0, 0.0),
+        position: Tuple[float, float, float] | np.ndarray = (0.0, 0.0, 0.0),
         visible: bool = True,
     ) -> MeshSkinnedHandle:
         """Add a skinned mesh to the scene, which we can deform using a set of
@@ -770,53 +1150,41 @@ class SceneApi:
                 stacklevel=2,
             )
 
+        assert len(bone_wxyzs) == len(bone_positions)
         num_bones = len(bone_wxyzs)
         assert skin_weights.shape == (vertices.shape[0], num_bones)
 
         # Take the four biggest indices.
-        top4_skin_indices = onp.argsort(skin_weights, axis=-1)[:, -4:]
+        top4_skin_indices = np.argsort(skin_weights, axis=-1)[:, -4:]
         top4_skin_weights = skin_weights[
-            onp.arange(vertices.shape[0])[:, None], top4_skin_indices
+            np.arange(vertices.shape[0])[:, None], top4_skin_indices
         ]
         assert (
             top4_skin_weights.shape == top4_skin_indices.shape == (vertices.shape[0], 4)
         )
 
-        bone_wxyzs = onp.asarray(bone_wxyzs)
-        bone_positions = onp.asarray(bone_positions)
+        bone_wxyzs = np.asarray(bone_wxyzs)
+        bone_positions = np.asarray(bone_positions)
         assert bone_wxyzs.shape == (num_bones, 4)
         assert bone_positions.shape == (num_bones, 3)
-        self._websock_interface.queue_message(
-            _messages.SkinnedMeshMessage(
-                name,
-                vertices.astype(onp.float32),
-                faces.astype(onp.uint32),
-                # (255, 255, 255) => 0xffffff, etc
+        message = _messages.SkinnedMeshMessage(
+            name=name,
+            props=_messages.SkinnedMeshProps(
+                vertices=vertices.astype(np.float32),
+                faces=faces.astype(np.uint32),
                 color=_encode_rgb(color),
-                vertex_colors=None,
                 wireframe=wireframe,
                 opacity=opacity,
                 flat_shading=flat_shading,
                 side=side,
                 material=material,
-                bone_wxyzs=tuple(
-                    (
-                        float(wxyz[0]),
-                        float(wxyz[1]),
-                        float(wxyz[2]),
-                        float(wxyz[3]),
-                    )
-                    for wxyz in bone_wxyzs.astype(onp.float32)
-                ),
-                bone_positions=tuple(
-                    (float(xyz[0]), float(xyz[1]), float(xyz[2]))
-                    for xyz in bone_positions.astype(onp.float32)
-                ),
-                skin_indices=top4_skin_indices.astype(onp.uint16),
-                skin_weights=top4_skin_weights.astype(onp.float32),
-            )
+                bone_wxyzs=bone_wxyzs.astype(np.float32),
+                bone_positions=bone_positions.astype(np.float32),
+                skin_indices=top4_skin_indices.astype(np.uint16),
+                skin_weights=top4_skin_weights.astype(np.float32),
+            ),
         )
-        handle = MeshHandle._make(self, name, wxyz, position, visible)
+        handle = MeshHandle._make(self, message, name, wxyz, position, visible)
         return MeshSkinnedHandle(
             handle._impl,
             bones=tuple(
@@ -825,8 +1193,8 @@ class SceneApi:
                         name=name,
                         websock_interface=self._websock_interface,
                         bone_index=i,
-                        wxyz=bone_wxyzs[i],
-                        position=bone_positions[i],
+                        wxyz=bone_wxyzs[i].copy(),
+                        position=bone_positions[i].copy(),
                     )
                 )
                 for i in range(num_bones)
@@ -836,16 +1204,16 @@ class SceneApi:
     def add_mesh_simple(
         self,
         name: str,
-        vertices: onp.ndarray,
-        faces: onp.ndarray,
+        vertices: np.ndarray,
+        faces: np.ndarray,
         color: RgbTupleOrArray = (90, 200, 255),
         wireframe: bool = False,
         opacity: float | None = None,
         material: Literal["standard", "toon3", "toon5"] = "standard",
         flat_shading: bool = False,
         side: Literal["front", "back", "double"] = "front",
-        wxyz: tuple[float, float, float, float] | onp.ndarray = (1.0, 0.0, 0.0, 0.0),
-        position: tuple[float, float, float] | onp.ndarray = (0.0, 0.0, 0.0),
+        wxyz: tuple[float, float, float, float] | np.ndarray = (1.0, 0.0, 0.0, 0.0),
+        position: tuple[float, float, float] | np.ndarray = (0.0, 0.0, 0.0),
         visible: bool = True,
     ) -> MeshHandle:
         """Add a mesh to the scene.
@@ -881,31 +1249,28 @@ class SceneApi:
                 f"Invalid combination of {wireframe=} and {flat_shading=}. Flat shading argument will be ignored.",
                 stacklevel=2,
             )
-
-        self._websock_interface.queue_message(
-            _messages.MeshMessage(
-                name,
-                vertices.astype(onp.float32),
-                faces.astype(onp.uint32),
-                # (255, 255, 255) => 0xffffff, etc
+        message = _messages.MeshMessage(
+            name=name,
+            props=_messages.MeshProps(
+                vertices=vertices.astype(np.float32),
+                faces=faces.astype(np.uint32),
                 color=_encode_rgb(color),
-                vertex_colors=None,
                 wireframe=wireframe,
                 opacity=opacity,
                 flat_shading=flat_shading,
                 side=side,
                 material=material,
-            )
+            ),
         )
-        return MeshHandle._make(self, name, wxyz, position, visible)
+        return MeshHandle._make(self, message, name, wxyz, position, visible)
 
     def add_mesh_trimesh(
         self,
         name: str,
         mesh: trimesh.Trimesh,
         scale: float = 1.0,
-        wxyz: tuple[float, float, float, float] | onp.ndarray = (1.0, 0.0, 0.0, 0.0),
-        position: tuple[float, float, float] | onp.ndarray = (0.0, 0.0, 0.0),
+        wxyz: tuple[float, float, float, float] | np.ndarray = (1.0, 0.0, 0.0, 0.0),
+        position: tuple[float, float, float] | np.ndarray = (0.0, 0.0, 0.0),
         visible: bool = True,
     ) -> GlbHandle:
         """Add a trimesh mesh to the scene. Internally calls `self.add_glb()`.
@@ -935,20 +1300,24 @@ class SceneApi:
                 visible=visible,
             )
 
-    def _add_gaussian_splats(
+    def _add_gaussian_splats(self, *args, **kwargs) -> GaussianSplatHandle:
+        """Backwards compatibility shim. Use `add_gaussian_splats()` instead."""
+        return self.add_gaussian_splats(*args, **kwargs)
+
+    def add_gaussian_splats(
         self,
         name: str,
-        centers: onp.ndarray,
-        covariances: onp.ndarray,
-        rgbs: onp.ndarray,
-        opacities: onp.ndarray,
-        wxyz: Tuple[float, float, float, float] | onp.ndarray = (1.0, 0.0, 0.0, 0.0),
-        position: Tuple[float, float, float] | onp.ndarray = (0.0, 0.0, 0.0),
+        centers: np.ndarray,
+        covariances: np.ndarray,
+        rgbs: np.ndarray,
+        opacities: np.ndarray,
+        wxyz: Tuple[float, float, float, float] | np.ndarray = (1.0, 0.0, 0.0, 0.0),
+        position: Tuple[float, float, float] | np.ndarray = (0.0, 0.0, 0.0),
         visible: bool = True,
     ) -> GaussianSplatHandle:
         """Add a model to render using Gaussian Splatting.
 
-        **Work-in-progress.** This feature is experimental and still under
+        **Experimental.** This feature is experimental and still under
         development. It may be changed or removed.
 
         Arguments:
@@ -959,7 +1328,7 @@ class SceneApi:
             opacities: Opacity for each Gaussian. (N, 1).
             wxyz: R_parent_local transformation.
             position: t_parent_local transformation.
-            visibile: Initial visibility of scene node.
+            visible: Initial visibility of scene node.
 
         Returns:
             Scene node handle.
@@ -970,47 +1339,44 @@ class SceneApi:
         assert opacities.shape == (num_gaussians, 1)
         assert covariances.shape == (num_gaussians, 3, 3)
 
-        # Get cholesky factor of covariance. This helps retain precision when
-        # we convert to float16.
-        cov_cholesky_triu = (
-            onp.linalg.cholesky(covariances.astype(onp.float64) + onp.ones(3) * 1e-7)
-            .swapaxes(-1, -2)  # tril => triu
-            .reshape((-1, 9))[:, onp.array([0, 1, 2, 4, 5, 8])]
-        )
-        buffer = onp.concatenate(
+        # Get upper-triangular terms of covariance matrix.
+        cov_triu = covariances.reshape((-1, 9))[:, np.array([0, 1, 2, 4, 5, 8])]
+        buffer = np.concatenate(
             [
                 # First texelFetch.
                 # - xyz (96 bits): centers.
-                centers.astype(onp.float32).view(onp.uint8),
+                centers.astype(np.float32).view(np.uint8),
                 # - w (32 bits): this is reserved for use by the renderer.
-                onp.zeros((num_gaussians, 4), dtype=onp.uint8),
+                np.zeros((num_gaussians, 4), dtype=np.uint8),
                 # Second texelFetch.
-                # - xyz (96 bits): upper-triangular Cholesky factor of covariance.
-                cov_cholesky_triu.astype(onp.float16).copy().view(onp.uint8),
+                # - xyz (96 bits): upper-triangular terms of covariance.
+                cov_triu.astype(np.float16).copy().view(np.uint8),
                 # - w (32 bits): rgba.
-                _colors_to_uint8(rgbs),
-                _colors_to_uint8(opacities),
+                colors_to_uint8(rgbs),
+                colors_to_uint8(opacities),
             ],
             axis=-1,
-        ).view(onp.uint32)
+        ).view(np.uint32)
         assert buffer.shape == (num_gaussians, 8)
 
-        self._websock_interface.queue_message(
-            _messages.GaussianSplatsMessage(
-                name=name,
+        message = _messages.GaussianSplatsMessage(
+            name=name,
+            props=_messages.GaussianSplatsProps(
                 buffer=buffer,
-            )
+            ),
         )
-        node_handle = GaussianSplatHandle._make(self, name, wxyz, position, visible)
+        node_handle = GaussianSplatHandle._make(
+            self, message, name, wxyz, position, visible
+        )
         return node_handle
 
     def add_box(
         self,
         name: str,
         color: RgbTupleOrArray,
-        dimensions: tuple[float, float, float] | onp.ndarray = (1.0, 1.0, 1.0),
-        wxyz: tuple[float, float, float, float] | onp.ndarray = (1.0, 0.0, 0.0, 0.0),
-        position: tuple[float, float, float] | onp.ndarray = (0.0, 0.0, 0.0),
+        dimensions: tuple[float, float, float] | np.ndarray = (1.0, 1.0, 1.0),
+        wxyz: tuple[float, float, float, float] | np.ndarray = (1.0, 0.0, 0.0, 0.0),
+        position: tuple[float, float, float] | np.ndarray = (0.0, 0.0, 0.0),
         visible: bool = True,
     ) -> MeshHandle:
         """Add a box to the scene.
@@ -1048,8 +1414,8 @@ class SceneApi:
         radius: float,
         color: RgbTupleOrArray,
         subdivisions: int = 3,
-        wxyz: tuple[float, float, float, float] | onp.ndarray = (1.0, 0.0, 0.0, 0.0),
-        position: tuple[float, float, float] | onp.ndarray = (0.0, 0.0, 0.0),
+        wxyz: tuple[float, float, float, float] | np.ndarray = (1.0, 0.0, 0.0, 0.0),
+        position: tuple[float, float, float] | np.ndarray = (0.0, 0.0, 0.0),
         visible: bool = True,
     ) -> MeshHandle:
         """Add an icosphere to the scene.
@@ -1086,10 +1452,10 @@ class SceneApi:
 
     def set_background_image(
         self,
-        image: onp.ndarray,
+        image: np.ndarray | None,
         format: Literal["png", "jpeg"] = "jpeg",
         jpeg_quality: int | None = None,
-        depth: onp.ndarray | None = None,
+        depth: np.ndarray | None = None,
     ) -> None:
         """Set a background image for the scene, optionally with depth compositing.
 
@@ -1099,9 +1465,13 @@ class SceneApi:
             jpeg_quality: Quality of the jpeg image (if jpeg format is used).
             depth: Optional depth image to use to composite background with scene elements.
         """
-        media_type, rgb_bytes = _encode_image_binary(
-            image, format, jpeg_quality=jpeg_quality
-        )
+        if image is None:
+            media_type = "image/png"
+            rgb_bytes = None
+        else:
+            media_type, rgb_bytes = _encode_image_binary(
+                image, format, jpeg_quality=jpeg_quality
+            )
 
         # Encode depth if provided. We use a 3-channel PNG to represent a fixed point
         # depth at each pixel.
@@ -1114,9 +1484,9 @@ class SceneApi:
             assert len(depth.shape) == 2 or (
                 len(depth.shape) == 3 and depth.shape[2] == 1
             ), "Depth should have shape (H,W) or (H,W,1)."
-            depth = onp.clip(depth * 100_000, 0, 2**24 - 1).astype(onp.uint32)
+            depth = np.clip(depth * 100_000, 0, 2**24 - 1).astype(np.uint32)
             assert depth is not None  # Appease mypy.
-            intdepth: onp.ndarray = depth.reshape((*depth.shape[:2], 1)).view(onp.uint8)
+            intdepth: np.ndarray = depth.reshape((*depth.shape[:2], 1)).view(np.uint8)
             assert intdepth.shape == (*depth.shape[:2], 4)
             with io.BytesIO() as data_buffer:
                 iio.imwrite(data_buffer, intdepth[:, :, :3], extension=".png")
@@ -1125,21 +1495,21 @@ class SceneApi:
         self._websock_interface.queue_message(
             _messages.BackgroundImageMessage(
                 media_type=media_type,
-                rgb_bytes=rgb_bytes,
-                depth_bytes=depth_bytes,
+                rgb_data=rgb_bytes,
+                depth_data=depth_bytes,
             )
         )
 
     def add_image(
         self,
         name: str,
-        image: onp.ndarray,
+        image: np.ndarray,
         render_width: float,
         render_height: float,
         format: Literal["png", "jpeg"] = "jpeg",
         jpeg_quality: int | None = None,
-        wxyz: tuple[float, float, float, float] | onp.ndarray = (1.0, 0.0, 0.0, 0.0),
-        position: tuple[float, float, float] | onp.ndarray = (0.0, 0.0, 0.0),
+        wxyz: tuple[float, float, float, float] | np.ndarray = (1.0, 0.0, 0.0, 0.0),
+        position: tuple[float, float, float] | np.ndarray = (0.0, 0.0, 0.0),
         visible: bool = True,
     ) -> ImageHandle:
         """Add a 2D image to the scene.
@@ -1159,20 +1529,22 @@ class SceneApi:
         Returns:
             Handle for manipulating scene node.
         """
-
         media_type, binary = _encode_image_binary(
             image, format, jpeg_quality=jpeg_quality
         )
-        self._websock_interface.queue_message(
-            _messages.ImageMessage(
-                name=name,
+        message = _messages.ImageMessage(
+            name=name,
+            props=_messages.ImageProps(
                 media_type=media_type,
-                data=binary,
+                _data=binary,
                 render_width=render_width,
                 render_height=render_height,
-            )
+            ),
         )
-        return ImageHandle._make(self, name, wxyz, position, visible)
+        handle = ImageHandle._make(self, message, name, wxyz, position, visible)
+        handle._image = image
+        handle._jpeg_quality = jpeg_quality
+        return handle
 
     def add_transform_controls(
         self,
@@ -1193,8 +1565,8 @@ class SceneApi:
         ] = ((-1000.0, 1000.0), (-1000.0, 1000.0), (-1000.0, 1000.0)),
         depth_test: bool = True,
         opacity: float = 1.0,
-        wxyz: tuple[float, float, float, float] | onp.ndarray = (1.0, 0.0, 0.0, 0.0),
-        position: tuple[float, float, float] | onp.ndarray = (0.0, 0.0, 0.0),
+        wxyz: tuple[float, float, float, float] | np.ndarray = (1.0, 0.0, 0.0, 0.0),
+        position: tuple[float, float, float] | np.ndarray = (0.0, 0.0, 0.0),
         visible: bool = True,
     ) -> TransformControlsHandle:
         """Add a transform gizmo for interacting with the scene.
@@ -1224,9 +1596,9 @@ class SceneApi:
         Returns:
             Handle for manipulating (and reading state of) scene node.
         """
-        self._websock_interface.queue_message(
-            _messages.TransformControlsMessage(
-                name=name,
+        message = _messages.TransformControlsMessage(
+            name=name,
+            props=_messages.TransformControlsProps(
                 scale=scale,
                 line_width=line_width,
                 fixed=fixed,
@@ -1239,7 +1611,7 @@ class SceneApi:
                 rotation_limits=rotation_limits,
                 depth_test=depth_test,
                 opacity=opacity,
-            )
+            ),
         )
 
         def sync_cb(client_id: ClientId, state: TransformControlsHandle) -> None:
@@ -1257,7 +1629,9 @@ class SceneApi:
             message_position.excluded_self_client = client_id
             self._websock_interface.queue_message(message_position)
 
-        node_handle = SceneNodeHandle._make(self, name, wxyz, position, visible)
+        node_handle = SceneNodeHandle._make(
+            self, message, name, wxyz, position, visible
+        )
         state_aux = _TransformControlsState(
             last_updated=time.time(),
             update_cb=[],
@@ -1269,7 +1643,16 @@ class SceneApi:
 
     def reset(self) -> None:
         """Reset the scene."""
-        self._websock_interface.queue_message(_messages.ResetSceneMessage())
+
+        # Remove all scene nodes.
+        handles = list(self._handle_from_node_name.values())
+        for handle in handles:
+            if handle.name == "/WorldAxes":
+                continue
+            handle.remove()
+
+        # Clear the background image.
+        self.set_background_image(image=None)
 
     def _get_client_handle(self, client_id: ClientId) -> ClientHandle:
         """Private helper for getting a client handle from its ID."""
@@ -1289,7 +1672,7 @@ class SceneApi:
             assert client_id == self._owner.client_id
             return self._owner
 
-    def _handle_transform_controls_updates(
+    async def _handle_transform_controls_updates(
         self, client_id: ClientId, message: _messages.TransformControlsUpdateMessage
     ) -> None:
         """Callback for handling transform gizmo messages."""
@@ -1298,20 +1681,24 @@ class SceneApi:
             return
 
         # Update state.
-        wxyz = onp.array(message.wxyz)
-        position = onp.array(message.position)
-        with self._owner.atomic():
-            handle._impl.wxyz = wxyz
-            handle._impl.position = position
-            handle._impl_aux.last_updated = time.time()
+        wxyz = np.array(message.wxyz)
+        position = np.array(message.position)
+        handle._impl.wxyz = wxyz
+        handle._impl.position = position
+        handle._impl_aux.last_updated = time.time()
 
         # Trigger callbacks.
         for cb in handle._impl_aux.update_cb:
-            cb(handle)
+            if asyncio.iscoroutinefunction(cb):
+                await cb(handle)
+            else:
+                self._thread_executor.submit(cb, handle).add_done_callback(
+                    print_threadpool_errors
+                )
         if handle._impl_aux.sync_cb is not None:
             handle._impl_aux.sync_cb(client_id, handle)
 
-    def _handle_node_click_updates(
+    async def _handle_node_click_updates(
         self, client_id: ClientId, message: _messages.SceneNodeClickMessage
     ) -> None:
         """Callback for handling click messages."""
@@ -1323,15 +1710,20 @@ class SceneApi:
                 client=self._get_client_handle(client_id),
                 client_id=client_id,
                 event="click",
-                target=handle,
+                target=cast(_ClickableSceneNodeHandle, handle),
                 ray_origin=message.ray_origin,
                 ray_direction=message.ray_direction,
                 screen_pos=message.screen_pos,
                 instance_index=message.instance_index,
             )
-            cb(event)  # type: ignore
+            if asyncio.iscoroutinefunction(cb):
+                await cb(event)
+            else:
+                self._thread_executor.submit(cb, event).add_done_callback(
+                    print_threadpool_errors
+                )
 
-    def _handle_scene_pointer_updates(
+    async def _handle_scene_pointer_updates(
         self, client_id: ClientId, message: _messages.ScenePointerMessage
     ):
         """Callback for handling click messages."""
@@ -1346,7 +1738,12 @@ class SceneApi:
         # Call the callback if it exists, and the after-run callback.
         if self._scene_pointer_cb is None:
             return
-        self._scene_pointer_cb(event)
+        if asyncio.iscoroutinefunction(self._scene_pointer_cb):
+            await self._scene_pointer_cb(event)
+        else:
+            self._thread_executor.submit(
+                self._scene_pointer_cb, event
+            ).add_done_callback(print_threadpool_errors)
 
     def on_pointer_event(
         self, event_type: Literal["click", "rect-select"]
@@ -1401,8 +1798,8 @@ class SceneApi:
 
     def on_pointer_callback_removed(
         self,
-        func: Callable[[], None],
-    ) -> Callable[[], None]:
+        func: Callable[[], NoneOrCoroutine],
+    ) -> Callable[[], NoneOrCoroutine]:
         """Add a callback to run automatically when the callback for a scene
         pointer event is removed. This will be triggered exactly once, either
         manually (via :meth:`remove_pointer_callback()`) or automatically (if
@@ -1437,7 +1834,10 @@ class SceneApi:
         self._owner.flush()
 
         # Run cleanup callback.
-        self._scene_pointer_done_cb()
+        if asyncio.iscoroutinefunction(self._scene_pointer_done_cb):
+            self._event_loop.create_task(self._scene_pointer_done_cb())
+        else:
+            self._scene_pointer_done_cb()
 
         # Reset the callback and event type, on the python side.
         self._scene_pointer_cb = None
@@ -1447,8 +1847,8 @@ class SceneApi:
     def add_3d_gui_container(
         self,
         name: str,
-        wxyz: tuple[float, float, float, float] | onp.ndarray = (1.0, 0.0, 0.0, 0.0),
-        position: tuple[float, float, float] | onp.ndarray = (0.0, 0.0, 0.0),
+        wxyz: tuple[float, float, float, float] | np.ndarray = (1.0, 0.0, 0.0, 0.0),
+        position: tuple[float, float, float] | np.ndarray = (0.0, 0.0, 0.0),
         visible: bool = True,
     ) -> Gui3dContainerHandle:
         """Add a 3D gui container to the scene. The returned container handle can be
@@ -1467,7 +1867,7 @@ class SceneApi:
         """
 
         # Avoids circular import.
-        from ._gui_api import _make_unique_id
+        from ._gui_api import _make_uuid
 
         # New name to make the type checker happy; ViserServer and ClientHandle inherit
         # from both GuiApi and MessageApi. The pattern below is unideal.
@@ -1478,13 +1878,24 @@ class SceneApi:
         if name in self._handle_from_node_name:
             self._handle_from_node_name[name].remove()
 
-        container_id = _make_unique_id()
-        self._websock_interface.queue_message(
-            _messages.Gui3DMessage(
+        container_id = _make_uuid()
+        message = _messages.Gui3DMessage(
+            name=name,
+            props=_messages.Gui3DProps(
                 order=time.time(),
-                name=name,
-                container_id=container_id,
-            )
+                container_uuid=container_id,
+            ),
         )
-        node_handle = SceneNodeHandle._make(self, name, wxyz, position, visible=visible)
+        node_handle = SceneNodeHandle._make(
+            self, message, name, wxyz, position, visible=visible
+        )
         return Gui3dContainerHandle(node_handle._impl, gui_api, container_id)
+
+    def remove_by_name(self, name: str) -> None:
+        """Helper to call `.remove()` on the scene node handles of the `name`
+        element or any of its children."""
+        handle_from_node_name = self._handle_from_node_name.copy()
+        name = name.rstrip("/")  # '/parent/' => '/parent'
+        for node_name, handle in handle_from_node_name.items():
+            if node_name == name or node_name.startswith(name + "/"):
+                handle.remove()

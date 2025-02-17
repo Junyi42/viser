@@ -6,22 +6,24 @@ import contextlib
 import dataclasses
 import gzip
 import http
+import logging
 import mimetypes
 import queue
 import threading
 from asyncio.events import AbstractEventLoop
-from concurrent.futures import ThreadPoolExecutor
+from collections.abc import Coroutine
 from pathlib import Path
 from typing import Any, Callable, Generator, NewType, TypeVar
 
 import msgspec
 import rich
-import websockets.connection
+import websockets.asyncio.server
 import websockets.datastructures
 import websockets.exceptions
-import websockets.server
 from typing_extensions import Literal, assert_never, override
-from websockets.legacy.server import WebSocketServerProtocol
+from websockets import Headers
+from websockets.asyncio.server import ServerConnection
+from websockets.http11 import Request, Response
 
 from ._async_message_buffer import AsyncMessageBuffer
 from ._messages import Message
@@ -39,46 +41,53 @@ ClientId = NewType("ClientId", int)
 TMessage = TypeVar("TMessage", bound=Message)
 
 
-class RecordHandle:
-    """**Experimental.**
-
-    Handle for recording outgoing messages. Useful for logging + debugging."""
+class StateSerializer:
+    """Handle for serializing messages. In Viser, this is used to save the
+    scene state so it can be shared/embedded in static webpages."""
 
     def __init__(
         self, handler: WebsockMessageHandler, filter: Callable[[Message], bool]
     ):
         self._handler = handler
         self._filter = filter
-        self._loop_start_index: int | None = None
         self._time: float = 0.0
         self._messages: list[tuple[float, dict[str, Any]]] = []
 
     def _insert_message(self, message: Message) -> None:
         """Insert a message into the recorded file."""
 
-        # Exclude GUI messages. This is hacky.
+        # Exclude messages that are filtered out. In Viser, this is typically
+        # GUI messages.
         if not self._filter(message):
             return
         self._messages.append((self._time, message.as_serializable_dict()))
 
     def insert_sleep(self, duration: float) -> None:
-        """Insert a sleep into the recorded file."""
+        """Insert a sleep into the recorded file. This can be useful for
+        dynamic 3D data."""
+        assert self._handler._record_handle is not None, (
+            "serialize() was already called!"
+        )
         self._time += duration
 
-    def set_loop_start(self) -> None:
-        """Mark the start of the loop. Messages sent after this point will be
-        looped. Should only be called once."""
-        assert self._loop_start_index is None, "Loop start already set."
-        self._loop_start_index = len(self._messages)
+    def serialize(self) -> bytes:
+        """Serialize saved messages. Should only be called once. Our convention
+        is to write this binary format to a file with a ``.viser`` extension,
+        for example via ``pathlib.Path("file.viser").write_bytes(...)``.
 
-    def end_and_serialize(self) -> bytes:
-        """End the recording and serialize contents. Returns the recording as
-        bytes, which should generally be written to a file."""
+        Returns:
+            The recording as bytes.
+        """
+        assert self._handler._record_handle is not None, (
+            "serialize() was already called!"
+        )
+        import viser
+
         packed_bytes = msgspec.msgpack.encode(
             {
-                "loopStartIndex": self._loop_start_index,
                 "durationSeconds": self._time,
                 "messages": self._messages,
+                "viserVersion": viser.__version__,
             }
         )
         assert isinstance(packed_bytes, bytes)
@@ -89,29 +98,29 @@ class RecordHandle:
 class WebsockMessageHandler:
     """Mix-in for adding message handling to a class."""
 
-    def __init__(self, thread_executor: ThreadPoolExecutor) -> None:
-        self._thread_executor = thread_executor
+    def __init__(self) -> None:
         self._incoming_handlers: dict[
-            type[Message], list[Callable[[ClientId, Message], None]]
+            type[Message], list[Callable[[ClientId, Message], None | Coroutine]]
         ] = {}
-        self._atomic_lock = threading.Lock()
         self._queued_messages: queue.Queue = queue.Queue()
         self._locked_thread_id = -1
 
         # Set to None if not recording.
-        self._record_handle: RecordHandle | None = None
+        self._record_handle: StateSerializer | None = None
 
-    def start_recording(self, filter: Callable[[Message], bool]) -> RecordHandle:
+    def get_message_serializer(
+        self, filter: Callable[[Message], bool]
+    ) -> StateSerializer:
         """Start recording messages that are sent. Sent messages will be
         serialized and can be used for playback."""
         assert self._record_handle is None, "Already recording."
-        self._record_handle = RecordHandle(self, filter)
+        self._record_handle = StateSerializer(self, filter)
         return self._record_handle
 
     def register_handler(
         self,
         message_cls: type[TMessage],
-        callback: Callable[[ClientId, TMessage], Any],
+        callback: Callable[[ClientId, TMessage], None | Coroutine],
     ) -> None:
         """Register a handler for a particular message type."""
         if message_cls not in self._incoming_handlers:
@@ -121,45 +130,37 @@ class WebsockMessageHandler:
     def unregister_handler(
         self,
         message_cls: type[TMessage],
-        callback: Callable[[ClientId, TMessage], Any] | None = None,
+        callback: Callable[[ClientId, TMessage], None | Coroutine] | None = None,
     ):
         """Unregister a handler for a particular message type."""
-        assert (
-            message_cls in self._incoming_handlers
-        ), "Tried to unregister a handler that hasn't been registered."
+        assert message_cls in self._incoming_handlers, (
+            "Tried to unregister a handler that hasn't been registered."
+        )
         if callback is None:
             self._incoming_handlers.pop(message_cls)
         else:
             self._incoming_handlers[message_cls].remove(callback)  # type: ignore
 
-    def _handle_incoming_message(self, client_id: ClientId, message: Message) -> None:
+    async def _handle_incoming_message(
+        self, client_id: ClientId, message: Message
+    ) -> None:
         """Handle incoming messages."""
         if type(message) in self._incoming_handlers:
             for cb in self._incoming_handlers[type(message)]:
-                cb(client_id, message)
+                if asyncio.iscoroutinefunction(cb):
+                    await cb(client_id, message)
+                else:
+                    cb(client_id, message)
 
     @abc.abstractmethod
-    def unsafe_send_message(self, message: Message) -> None: ...
+    def get_message_buffer(self) -> AsyncMessageBuffer: ...
 
     def queue_message(self, message: Message) -> None:
-        """Wrapped method for sending messages safely."""
+        """Wrapped method for sending messages."""
         if self._record_handle is not None:
             self._record_handle._insert_message(message)
 
-        got_lock = self._atomic_lock.acquire(blocking=False)
-        if got_lock:
-            self.unsafe_send_message(message)
-            self._atomic_lock.release()
-        else:
-            # Send when lock is acquirable, while retaining message order.
-            # This could be optimized!
-            self._queued_messages.put(message)
-
-            def try_again() -> None:
-                with self._atomic_lock:
-                    self.unsafe_send_message(self._queued_messages.get())
-
-            self._thread_executor.submit(try_again)
+        self.get_message_buffer().push(message)
 
     @contextlib.contextmanager
     def atomic(self) -> Generator[None, None, None]:
@@ -174,19 +175,9 @@ class WebsockMessageHandler:
             Context manager.
         """
         # If called multiple times in the same thread, we ignore inner calls.
-        thread_id = threading.get_ident()
-        if thread_id == self._locked_thread_id:
-            got_lock = False
-        else:
-            self._atomic_lock.acquire()
-            self._locked_thread_id = thread_id
-            got_lock = True
-
+        self.get_message_buffer().atomic_start()
         yield
-
-        if got_lock:
-            self._atomic_lock.release()
-            self._locked_thread_id = -1
+        self.get_message_buffer().atomic_end()
 
 
 class WebsockClientConnection(WebsockMessageHandler):
@@ -196,17 +187,16 @@ class WebsockClientConnection(WebsockMessageHandler):
     def __init__(
         self,
         client_id: int,
-        thread_executor: ThreadPoolExecutor,
         client_state: _ClientHandleState,
     ) -> None:
         self.client_id = client_id
         self._state = client_state
-        super().__init__(thread_executor)
+        super().__init__()
 
     @override
-    def unsafe_send_message(self, message: Message) -> None:
-        """Send a message to a specific client."""
-        self._state.message_buffer.push(message)
+    def get_message_buffer(self) -> AsyncMessageBuffer:
+        """Get client message buffer."""
+        return self._state.message_buffer
 
 
 class WebsockServer(WebsockMessageHandler):
@@ -239,11 +229,15 @@ class WebsockServer(WebsockMessageHandler):
         verbose: bool = True,
         client_api_version: Literal[0, 1] = 0,
     ):
-        super().__init__(thread_executor=ThreadPoolExecutor(max_workers=32))
+        super().__init__()
 
         # Track connected clients.
-        self._client_connect_cb: list[Callable[[WebsockClientConnection], None]] = []
-        self._client_disconnect_cb: list[Callable[[WebsockClientConnection], None]] = []
+        self._client_connect_cb: list[
+            Callable[[WebsockClientConnection], None | Coroutine]
+        ] = []
+        self._client_disconnect_cb: list[
+            Callable[[WebsockClientConnection], None | Coroutine]
+        ] = []
 
         self._host = host
         self._port = port
@@ -251,8 +245,9 @@ class WebsockServer(WebsockMessageHandler):
         self._http_server_root = http_server_root
         self._verbose = verbose
         self._client_api_version: Literal[0, 1] = client_api_version
-        self._shutdown_event = threading.Event()
-        self._ws_server: websockets.WebSocketServer | None = None
+        self._background_event_loop: asyncio.AbstractEventLoop | None = None
+
+        self._stop_event: asyncio.Event | None = None
 
         self._client_state_from_id: dict[int, _ClientHandleState] = {}
 
@@ -275,34 +270,30 @@ class WebsockServer(WebsockMessageHandler):
 
     def stop(self) -> None:
         """Stop the server."""
-        assert self._ws_server is not None
-        self._ws_server.close()
-        self._ws_server = None
-        self._thread_executor.shutdown(wait=True)
+        assert self._background_event_loop is not None
+        assert self._stop_event is not None
+        self._background_event_loop.call_soon_threadsafe(self._stop_event.set)
 
-    def on_client_connect(self, cb: Callable[[WebsockClientConnection], Any]) -> None:
+    def on_client_connect(
+        self, cb: Callable[[WebsockClientConnection], None | Coroutine]
+    ) -> None:
         """Attach a callback to run for newly connected clients."""
         self._client_connect_cb.append(cb)
 
     def on_client_disconnect(
-        self, cb: Callable[[WebsockClientConnection], Any]
+        self, cb: Callable[[WebsockClientConnection], None | Coroutine]
     ) -> None:
         """Attach a callback to run when clients disconnect."""
         self._client_disconnect_cb.append(cb)
 
     @override
-    def unsafe_send_message(self, message: Message) -> None:
-        """Pushes a message onto the broadcast queue. Message will be sent to all clients.
-
-        Broadcasted messages are persistent: if a new client connects to the server,
-        they will receive a buffered set of previously broadcasted messages. The buffer
-        is culled using the value of `message.redundancy_key()`."""
-        self._broadcast_buffer.push(message)
+    def get_message_buffer(self) -> AsyncMessageBuffer:
+        """Pushes a message onto the broadcast queue. Message will be sent to all clients."""
+        return self._broadcast_buffer
 
     def flush(self) -> None:
         """Flush the outgoing message buffer for broadcasted messages. Any buffered
         messages will immediately be sent. (by default they are windowed)"""
-        # TODO: we should add a flush event.
         self._broadcast_buffer.flush()
 
     def flush_client(self, client_id: int) -> None:
@@ -319,6 +310,8 @@ class WebsockServer(WebsockMessageHandler):
         # Need to make a new event loop for notebook compatbility.
         event_loop = asyncio.new_event_loop()
         asyncio.set_event_loop(event_loop)
+        self._stop_event = asyncio.Event()
+        self._background_event_loop = event_loop
         self._broadcast_buffer = AsyncMessageBuffer(
             event_loop, persistent_messages=True
         )
@@ -327,9 +320,10 @@ class WebsockServer(WebsockMessageHandler):
         connection_count = 0
         total_connections = 0
 
-        async def serve(websocket: WebSocketServerProtocol) -> None:
-            """Server loop, run once per connection."""
-
+        async def ws_handler(
+            connection: websockets.asyncio.server.ServerConnection,
+        ) -> None:
+            """Handler for websocket connections."""
             async with count_lock:
                 nonlocal connection_count
                 client_id = ClientId(connection_count)
@@ -337,6 +331,28 @@ class WebsockServer(WebsockMessageHandler):
 
                 nonlocal total_connections
                 total_connections += 1
+
+            client_state = _ClientHandleState(
+                AsyncMessageBuffer(event_loop, persistent_messages=False),
+                event_loop,
+            )
+            client_connection = WebsockClientConnection(client_id, client_state)
+            self._client_state_from_id[client_id] = client_state
+
+            def handle_incoming(message: Message) -> None:
+                event_loop.create_task(
+                    self._handle_incoming_message(client_id, message)
+                )
+                event_loop.create_task(
+                    client_connection._handle_incoming_message(client_id, message)
+                )
+
+            # New connection callbacks.
+            for cb in self._client_connect_cb:
+                if asyncio.iscoroutinefunction(cb):
+                    await cb(client_connection)
+                else:
+                    cb(client_connection)
 
             if self._verbose:
                 rich.print(
@@ -346,50 +362,23 @@ class WebsockServer(WebsockMessageHandler):
                     " messages"
                 )
 
-            client_state = _ClientHandleState(
-                AsyncMessageBuffer(event_loop, persistent_messages=False),
-                event_loop,
-            )
-            client_connection = WebsockClientConnection(
-                client_id, self._thread_executor, client_state
-            )
-            self._client_state_from_id[client_id] = client_state
-
-            def handle_incoming(message: Message) -> None:
-                self._thread_executor.submit(
-                    error_print_wrapper(
-                        lambda: self._handle_incoming_message(client_id, message)
-                    )
-                )
-                self._thread_executor.submit(
-                    error_print_wrapper(
-                        lambda: client_connection._handle_incoming_message(
-                            client_id, message
-                        )
-                    )
-                )
-
-            # New connection callbacks.
-            for cb in self._client_connect_cb:
-                cb(client_connection)
-
             try:
                 # For each client: infinite loop over producers (which send messages)
                 # and consumers (which receive messages).
                 await asyncio.gather(
                     _message_producer(
-                        websocket,
+                        connection,
                         client_state.message_buffer,
                         client_id,
                         self._client_api_version,
                     ),
                     _message_producer(
-                        websocket,
+                        connection,
                         self._broadcast_buffer,
                         client_id,
                         self._client_api_version,
                     ),
-                    _message_consumer(websocket, handle_incoming, message_class),
+                    _message_consumer(connection, handle_incoming, message_class),
                 )
             except (
                 websockets.exceptions.ConnectionClosedOK,
@@ -405,7 +394,10 @@ class WebsockServer(WebsockMessageHandler):
 
                 # Disconnection callbacks.
                 for cb in self._client_disconnect_cb:
-                    cb(client_connection)
+                    if asyncio.iscoroutinefunction(cb):
+                        await cb(client_connection)
+                    else:
+                        cb(client_connection)
 
                 # Cleanup.
                 self._client_state_from_id.pop(client_id)
@@ -420,16 +412,32 @@ class WebsockServer(WebsockMessageHandler):
         file_cache: dict[Path, bytes] = {}
         file_cache_gzipped: dict[Path, bytes] = {}
 
-        async def viser_http_server(
-            path: str, request_headers: websockets.datastructures.Headers
-        ) -> (
-            tuple[http.HTTPStatus, websockets.datastructures.HeadersLike, bytes] | None
-        ):
+        filter_added = False
+
+        def viser_http_server(
+            connection: ServerConnection,
+            request: Request,
+        ) -> Response | None:
+            # <Hack>
+            # Suppress errors for: https://github.com/python-websockets/websockets/issues/1513
+            # TODO: remove this when websockets behavior changes upstream.
+            nonlocal filter_added
+            if not filter_added:
+
+                class NoHttpErrors(logging.Filter):
+                    def filter(self, record):
+                        return not record.getMessage() == "opening handshake failed"
+
+                connection.logger.logger.addFilter(NoHttpErrors())  # type: ignore
+                filter_added = True
+            # </Hack>
+
             # Ignore websocket packets.
-            if request_headers.get("Upgrade") == "websocket":
+            if request.headers.get("Upgrade") == "websocket":
                 return None
 
             # Strip out search params, get relative path.
+            path = request.path
             path = path.partition("?")[0]
             relpath = str(Path(path).relative_to("/"))
             if relpath == ".":
@@ -438,17 +446,40 @@ class WebsockServer(WebsockMessageHandler):
 
             source_path = http_server_root / relpath
             if not source_path.exists():
-                return (http.HTTPStatus.NOT_FOUND, {}, b"404")  # type: ignore
+                return Response(http.HTTPStatus.NOT_FOUND, "NOT FOUND", Headers())
 
-            use_gzip = "gzip" in request_headers.get("Accept-Encoding", "")
+            use_gzip = "gzip" in request.headers.get("Accept-Encoding", "")
 
-            mime_type = mimetypes.guess_type(relpath)[0]
+            # First, try some known MIME types. Using guess_type() can cause
+            # problems for Javascript on some Windows machines.
+            #
+            # Some references:
+            #     https://github.com/nerfstudio-project/viser/issues/256#issuecomment-2369684252
+            #     https://bugs.python.org/issue43975
+            #     https://github.com/golang/go/issues/32350#issuecomment-525111557
+            #
+            # We're assuming UTF-8, this is mostly reasonable but might want to revisit.
+            mime_type = {
+                ".css": "text/css; charset=utf-8",
+                ".gif": "image/gif",
+                ".htm": "text/html; charset=utf-8",
+                ".html": "text/html; charset=utf-8",
+                ".jpg": "image/jpeg",
+                ".js": "application/javascript",
+                ".wasm": "application/wasm",
+                ".pdf": "application/pdf",
+                ".png": "image/png",
+                ".svg": "image/svg+xml",
+                ".xml": "text/xml; charset=utf-8",
+            }.get(Path(path).suffix.lower(), None)
+            if mime_type is None:
+                mime_type = mimetypes.guess_type(relpath)[0]
             if mime_type is None:
                 mime_type = "application/octet-stream"
+
             response_headers = {
                 "Content-Type": mime_type,
             }
-
             if source_path not in file_cache:
                 file_cache[source_path] = source_path.read_bytes()
             if use_gzip:
@@ -462,42 +493,44 @@ class WebsockServer(WebsockMessageHandler):
                 response_payload = file_cache[source_path]
 
             # Try to read + send over file.
-            return (http.HTTPStatus.OK, response_headers, response_payload)
+            return Response(
+                http.HTTPStatus.OK,
+                "OK",
+                websockets.datastructures.Headers(**response_headers),
+                response_payload,
+            )
+            # return (http.HTTPStatus.OK, response_headers, response_payload)
 
-        for _ in range(1000):
-            try:
-                serve_future = websockets.server.serve(
-                    serve,
-                    host,
-                    port,
-                    # Compression can be turned off to reduce client-side CPU usage.
-                    # compression=None,
-                    process_request=(
-                        viser_http_server if http_server_root is not None else None
-                    ),
-                )
-                self._ws_server = serve_future.ws_server
-                event_loop.run_until_complete(serve_future)
-                break
-            except OSError:  # Port not available.
-                port += 1
-                continue
+        async def start_server() -> None:
+            port_attempt = port
+            for _ in range(1000):
+                try:
+                    async with websockets.asyncio.server.serve(
+                        ws_handler,
+                        host,
+                        port_attempt,
+                        # Compression can be too slow for our use cases.
+                        compression=None,
+                        process_request=(
+                            viser_http_server if http_server_root is not None else None
+                        ),
+                    ) as serve_future:
+                        assert serve_future.server is not None
+                        self._port = port_attempt
+                        ready_sem.release()
+                        assert self._stop_event is not None
+                        await self._stop_event.wait()
+                        return
+                except OSError:  # Port not available.
+                    port_attempt += 1
+                    continue
 
-        if self._ws_server is None:
-            raise RuntimeError("Failed to bind to port!")
-
-        self._port = port
-
-        ready_sem.release()
-        event_loop.run_forever()
-
-        # This will run only when the event loop ends, which happens when the
-        # websocket server is closed.
+        event_loop.run_until_complete(start_server())
         rich.print("[bold](viser)[/bold] Server stopped")
 
 
 async def _message_producer(
-    websocket: WebSocketServerProtocol,
+    websocket: ServerConnection,
     buffer: AsyncMessageBuffer,
     client_id: int,
     client_api_version: Literal[0, 1],
@@ -522,7 +555,7 @@ async def _message_producer(
 
 
 async def _message_consumer(
-    websocket: WebSocketServerProtocol,
+    websocket: ServerConnection,
     handle_message: Callable[[Message], None],
     message_class: type[Message],
 ) -> None:

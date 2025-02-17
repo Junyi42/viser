@@ -1,8 +1,9 @@
 import dataclasses
+import types
 from collections import defaultdict
 from typing import Any, Type, Union, cast
 
-import numpy as onp
+import numpy as np
 from typing_extensions import (
     Annotated,
     Literal,
@@ -26,7 +27,7 @@ _raw_type_mapping = {
     int: "number",
     str: "string",
     # For numpy arrays, we directly serialize the underlying data buffer.
-    onp.ndarray: "Uint8Array",
+    np.ndarray: "Uint8Array",
     bytes: "Uint8Array",
     Any: "any",
     None: "null",
@@ -48,6 +49,7 @@ def _get_ts_type(typ: Type[Any]) -> str:
         origin_typ = args[0]
 
     # Automatic Python => TypeScript conversion.
+    UnionType = getattr(types, "UnionType", Union)
     if origin_typ is tuple:
         args = get_args(typ)
         if len(args) == 2 and args[1] == ...:
@@ -58,6 +60,10 @@ def _get_ts_type(typ: Type[Any]) -> str:
         args = get_args(typ)
         assert len(args) == 1
         return _get_ts_type(args[0]) + "[]"
+    elif origin_typ is dict:
+        args = get_args(typ)
+        assert len(args) == 2
+        return "{[key: " + _get_ts_type(args[0]) + "]: " + _get_ts_type(args[1]) + "}"
     elif origin_typ in (Literal, LiteralAlt):
         return " | ".join(
             map(
@@ -65,7 +71,7 @@ def _get_ts_type(typ: Type[Any]) -> str:
                 get_args(typ),
             )
         )
-    elif origin_typ is Union:
+    elif origin_typ in (Union, UnionType):
         return (
             "("
             + " | ".join(
@@ -83,14 +89,16 @@ def _get_ts_type(typ: Type[Any]) -> str:
         args = get_args(typ)
         assert len(args) == 2
         return "{ [key: " + _get_ts_type(args[0]) + "]: " + _get_ts_type(args[1]) + " }"
-    elif is_typeddict(typ):
+    elif is_typeddict(typ) or dataclasses.is_dataclass(typ):
         hints = get_type_hints(typ)
+        if dataclasses.is_dataclass(typ):
+            hints = {field.name: hints[field.name] for field in dataclasses.fields(typ)}
         optional_keys = getattr(typ, "__optional_keys__", [])
 
         def fmt(key):
             val = hints[key]
             optional = key in optional_keys
-            if get_origin(val) is NotRequired:
+            if is_typeddict(typ) and get_origin(val) is NotRequired:
                 val = get_args(val)[0]
             ret = f"'{key}'{'?' if optional else ''}" + ": " + _get_ts_type(val)
             return ret
@@ -117,6 +125,7 @@ def generate_typescript_interfaces(message_cls: Type[Message]) -> str:
     """Generate TypeScript definitions for all subclasses of a base message class."""
     out_lines = []
     message_types = message_cls.get_subclasses()
+
     tag_map = defaultdict(list)
 
     # Generate interfaces for each specific message.
@@ -158,7 +167,17 @@ def generate_typescript_interfaces(message_cls: Type[Message]) -> str:
             out_lines.append(f"  | {cls_name}")
         out_lines[-1] = out_lines[-1] + ";"
 
-    interfaces = "\n".join(out_lines) + "\n"
+    for tag, cls_names in tag_map.items():
+        out_lines.extend(
+            [
+                f"const typeSet{tag} = new Set(['" + "', '".join(cls_names) + "']);"
+                f"export function is{tag}(message: Message): message is {tag}" + " {",
+                f"    return typeSet{tag}.has(message.type);",
+                "}",
+            ]
+        )
+
+    generated_typescript = "\n".join(out_lines) + "\n"
 
     # Add header and return.
     return (
@@ -172,5 +191,5 @@ def generate_typescript_interfaces(message_cls: Type[Message]) -> str:
                 "",
             ]
         )
-        + interfaces
+        + generated_typescript
     )

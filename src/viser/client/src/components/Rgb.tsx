@@ -3,25 +3,22 @@ import { ColorInput } from "@mantine/core";
 import { GuiComponentContext } from "../ControlPanel/GuiComponentContext";
 import { rgbToHex, hexToRgb } from "./utils";
 import { ViserInputComponent } from "./common";
-import { GuiAddRgbMessage } from "../WebsocketMessages";
+import { GuiRgbMessage } from "../WebsocketMessages";
 
 export default function RgbComponent({
-  id,
-  label,
-  hint,
+  uuid,
   value,
-  disabled,
-  visible,
-}: GuiAddRgbMessage) {
+  props: { label, hint, disabled, visible },
+}: GuiRgbMessage) {
   const { setValue } = React.useContext(GuiComponentContext)!;
   if (!visible) return <></>;
   return (
-    <ViserInputComponent {...{ id, hint, label }}>
+    <ViserInputComponent {...{ uuid, hint, label }}>
       <ColorInput
         disabled={disabled}
         size="xs"
         value={rgbToHex(value)}
-        onChange={(v) => setValue(id, hexToRgb(v))}
+        onChange={(v) => setValue(uuid, hexToRgb(v))}
         format="hex"
         // zIndex of dropdown should be >modal zIndex.
         // On edge cases: it seems like existing dropdowns are always closed when a new modal is opened.

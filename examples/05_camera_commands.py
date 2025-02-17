@@ -6,7 +6,7 @@ corresponding client automatically.
 
 import time
 
-import numpy as onp
+import numpy as np
 
 import viser
 import viser.transforms as tf
@@ -17,17 +17,40 @@ num_frames = 20
 
 @server.on_client_connect
 def _(client: viser.ClientHandle) -> None:
+    """For each client that connects, create GUI elements for adjusting the
+    near/far clipping planes."""
+
+    client.camera.far = 10.0
+
+    near_slider = client.gui.add_slider(
+        "Near", min=0.01, max=10.0, step=0.001, initial_value=client.camera.near
+    )
+    far_slider = client.gui.add_slider(
+        "Far", min=1, max=20.0, step=0.001, initial_value=client.camera.far
+    )
+
+    @near_slider.on_update
+    def _(_) -> None:
+        client.camera.near = near_slider.value
+
+    @far_slider.on_update
+    def _(_) -> None:
+        client.camera.far = far_slider.value
+
+
+@server.on_client_connect
+def _(client: viser.ClientHandle) -> None:
     """For each client that connects, we create a set of random frames + a click handler for each frame.
 
     When a frame is clicked, we move the camera to the corresponding frame.
     """
 
-    rng = onp.random.default_rng(0)
+    rng = np.random.default_rng(0)
 
     def make_frame(i: int) -> None:
         # Sample a random orientation + position.
         wxyz = rng.normal(size=4)
-        wxyz /= onp.linalg.norm(wxyz)
+        wxyz /= np.linalg.norm(wxyz)
         position = rng.uniform(-3.0, 3.0, size=(3,))
 
         # Create a coordinate frame and label.
@@ -42,7 +65,7 @@ def _(client: viser.ClientHandle) -> None:
             )
             T_world_target = tf.SE3.from_rotation_and_translation(
                 tf.SO3(frame.wxyz), frame.position
-            ) @ tf.SE3.from_translation(onp.array([0.0, 0.0, -0.5]))
+            ) @ tf.SE3.from_translation(np.array([0.0, 0.0, -0.5]))
 
             T_current_target = T_world_current.inverse() @ T_world_target
 

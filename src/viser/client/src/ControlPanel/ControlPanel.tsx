@@ -1,6 +1,6 @@
 import { useDisclosure, useMediaQuery } from "@mantine/hooks";
 import GeneratedGuiContainer from "./Generated";
-import { ViewerContext } from "../App";
+import { ViewerContext } from "../ViewerContext";
 
 import QRCode from "react-qr-code";
 import ServerControls from "./ServerControls";
@@ -42,6 +42,8 @@ import SidebarPanel from "./SidebarPanel";
 // Must match constant in Python.
 const ROOT_CONTAINER_ID = "root";
 
+const MemoizedGeneratedGuiContainer = React.memo(GeneratedGuiContainer);
+
 export default function ControlPanel(props: {
   control_layout: ThemeConfigurationMessage["control_layout"];
 }) {
@@ -51,7 +53,7 @@ export default function ControlPanel(props: {
   // TODO: will result in unnecessary re-renders.
   const viewer = React.useContext(ViewerContext)!;
   const showGenerated = viewer.useGui(
-    (state) => "root" in state.guiIdSetFromContainerId,
+    (state) => "root" in state.guiUuidSetFromContainerUuid,
   );
   const [showSettings, { toggle }] = useDisclosure(false);
 
@@ -62,10 +64,10 @@ export default function ControlPanel(props: {
     controlWidthString == "small"
       ? "16em"
       : controlWidthString == "medium"
-      ? "20em"
-      : controlWidthString == "large"
-      ? "24em"
-      : null
+        ? "20em"
+        : controlWidthString == "large"
+          ? "24em"
+          : null
   )!;
 
   const generatedServerToggleButton = (
@@ -81,7 +83,7 @@ export default function ControlPanel(props: {
     >
       <Tooltip
         zIndex={100}
-        label={showSettings ? "Return to GUI" : "Connection & diagnostics"}
+        label={showSettings ? "Return to GUI" : "Configuration & diagnostics"}
         withinPortal
       >
         {showSettings ? (
@@ -99,7 +101,7 @@ export default function ControlPanel(props: {
         <ServerControls />
       </Collapse>
       <Collapse in={showGenerated && !showSettings}>
-        <GeneratedGuiContainer containerId={ROOT_CONTAINER_ID} />
+        <MemoizedGeneratedGuiContainer containerUuid={ROOT_CONTAINER_ID} />
       </Collapse>
     </>
   );

@@ -13,7 +13,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
-import numpy as onp
 import tyro
 
 import viser
@@ -33,23 +32,23 @@ class SmplHelper:
 
     def __init__(self, model_path: Path) -> None:
         assert model_path.suffix.lower() == ".npz", "Model should be an .npz file!"
-        body_dict = dict(**onp.load(model_path, allow_pickle=True))
+        body_dict = dict(**np.load(model_path, allow_pickle=True))
 
-        self._J_regressor = body_dict["J_regressor"]
-        self._weights = body_dict["weights"]
-        self._v_template = body_dict["v_template"]
-        self._posedirs = body_dict["posedirs"]
-        self._shapedirs = body_dict["shapedirs"]
-        self._faces = body_dict["f"]
+        self.J_regressor = body_dict["J_regressor"]
+        self.weights = body_dict["weights"]
+        self.v_template = body_dict["v_template"]
+        self.posedirs = body_dict["posedirs"]
+        self.shapedirs = body_dict["shapedirs"]
+        self.faces = body_dict["f"]
 
-        self.num_joints: int = self._weights.shape[-1]
-        self.num_betas: int = self._shapedirs.shape[-1]
+        self.num_joints: int = self.weights.shape[-1]
+        self.num_betas: int = self.shapedirs.shape[-1]
         self.parent_idx: np.ndarray = body_dict["kintree_table"][0]
 
     def get_outputs(self, betas: np.ndarray, joint_rotmats: np.ndarray) -> SmplOutputs:
         # Get shaped vertices + joint positions, when all local poses are identity.
-        v_tpose = self._v_template + np.einsum("vxb,b->vx", self._shapedirs, betas)
-        j_tpose = np.einsum("jv,vx->jx", self._J_regressor, v_tpose)
+        v_tpose = self.v_template + np.einsum("vxb,b->vx", self.shapedirs, betas)
+        j_tpose = np.einsum("jv,vx->jx", self.J_regressor, v_tpose)
 
         # Local SE(3) transforms.
         T_parent_joint = np.zeros((self.num_joints, 4, 4)) + np.eye(4)
@@ -64,19 +63,22 @@ class SmplHelper:
 
         # Linear blend skinning.
         pose_delta = (joint_rotmats[1:, ...] - np.eye(3)).flatten()
-        v_blend = v_tpose + np.einsum("byn,n->by", self._posedirs, pose_delta)
+        v_blend = v_tpose + np.einsum("byn,n->by", self.posedirs, pose_delta)
         v_delta = np.ones((v_blend.shape[0], self.num_joints, 4))
         v_delta[:, :, :3] = v_blend[:, None, :] - j_tpose[None, :, :]
         v_posed = np.einsum(
-            "jxy,vj,vjy->vx", T_world_joint[:, :3, :], self._weights, v_delta
+            "jxy,vj,vjy->vx", T_world_joint[:, :3, :], self.weights, v_delta
         )
-        return SmplOutputs(v_posed, self._faces, T_world_joint, T_parent_joint)
+        return SmplOutputs(v_posed, self.faces, T_world_joint, T_parent_joint)
 
 
 def main(model_path: Path) -> None:
     server = viser.ViserServer()
     server.scene.set_up_direction("+y")
     server.gui.configure_theme(control_layout="collapsible")
+
+    server.scene.enable_default_lights(cast_shadow=True)
+    server.scene.add_grid("/grid", position=(0.0, -1.3, 0.0), plane="xz")
 
     # Main loop. We'll read pose/shape from the GUI elements, compute the mesh,
     # and then send the updated mesh in a loop.
@@ -87,6 +89,13 @@ def main(model_path: Path) -> None:
         num_joints=model.num_joints,
         parent_idx=model.parent_idx,
     )
+    body_handle = server.scene.add_mesh_simple(
+        "/human",
+        model.v_template,
+        model.faces,
+        wireframe=gui_elements.gui_wireframe.value,
+        color=gui_elements.gui_rgb.value,
+    )
     while True:
         # Do nothing if no change.
         time.sleep(0.02)
@@ -95,7 +104,7 @@ def main(model_path: Path) -> None:
 
         gui_elements.changed = False
 
-        # Compute SMPL outputs.
+        # If anything has changed, re-compute SMPL outputs.
         smpl_outputs = model.get_outputs(
             betas=np.array([x.value for x in gui_elements.gui_betas]),
             joint_rotmats=tf.SO3.exp(
@@ -103,13 +112,12 @@ def main(model_path: Path) -> None:
                 np.array([x.value for x in gui_elements.gui_joints])
             ).as_matrix(),
         )
-        server.scene.add_mesh_simple(
-            "/human",
-            smpl_outputs.vertices,
-            smpl_outputs.faces,
-            wireframe=gui_elements.gui_wireframe.value,
-            color=gui_elements.gui_rgb.value,
-        )
+
+        # Update the mesh properties based on the SMPL model output + GUI
+        # elements.
+        body_handle.vertices = smpl_outputs.vertices
+        body_handle.wireframe = gui_elements.gui_wireframe.value
+        body_handle.color = gui_elements.gui_rgb.value
 
         # Match transform control gizmos to joint positions.
         for i, control in enumerate(gui_elements.transform_controls):
@@ -147,7 +155,7 @@ def make_gui_elements(
     with tab_group.add_tab("View", viser.Icon.VIEWFINDER):
         gui_rgb = server.gui.add_rgb("Color", initial_value=(90, 200, 255))
         gui_wireframe = server.gui.add_checkbox("Wireframe", initial_value=False)
-        gui_show_controls = server.gui.add_checkbox("Handles", initial_value=False)
+        gui_show_controls = server.gui.add_checkbox("Handles", initial_value=True)
 
         gui_rgb.on_update(set_changed)
         gui_wireframe.on_update(set_changed)
@@ -170,7 +178,7 @@ def make_gui_elements(
         @gui_random_shape.on_click
         def _(_):
             for beta in gui_betas:
-                beta.value = onp.random.normal(loc=0.0, scale=1.0)
+                beta.value = np.random.normal(loc=0.0, scale=1.0)
 
         gui_betas = []
         for i in range(num_betas):
@@ -192,12 +200,9 @@ def make_gui_elements(
 
         @gui_random_joints.on_click
         def _(_):
+            rng = np.random.default_rng()
             for joint in gui_joints:
-                # It's hard to uniformly sample orientations directly in so(3), so we
-                # first sample on S^3 and then convert.
-                quat = onp.random.normal(loc=0.0, scale=1.0, size=(4,))
-                quat /= onp.linalg.norm(quat)
-                joint.value = tf.SO3(wxyz=quat).log()
+                joint.value = tf.SO3.sample_uniform(rng).log()
 
         gui_joints: list[viser.GuiInputHandle[tuple[float, float, float]]] = []
         for i in range(num_joints):

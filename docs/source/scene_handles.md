@@ -8,6 +8,13 @@ When a scene node is added to a server (for example, via
 connected clients. When a scene node is added to a client (for example, via
 :func:`viser.ClientHandle.add_frame()`), state is local to a specific client.
 
+The most common attributes to read and write here are
+:attr:`viser.SceneNodeHandle.wxyz` and :attr:`viser.SceneNodeHandle.position`.
+Each node type also has type-specific attributes that we can read and write.
+Many of these are lower-level than their equivalent arguments in factory
+methods like :func:`viser.ViserServer.add_frame()` or
+:func:`viser.ViserServer.add_image()`.
+
 <!-- prettier-ignore-start -->
 
 .. autoclass:: viser.SceneNodeHandle
@@ -19,6 +26,8 @@ connected clients. When a scene node is added to a client (for example, via
 .. autoclass:: viser.BatchedAxesHandle
 
 .. autoclass:: viser.GlbHandle
+
+.. autoclass:: viser.GridHandle
 
 .. autoclass:: viser.Gui3dContainerHandle
 
@@ -34,8 +43,24 @@ connected clients. When a scene node is added to a client (for example, via
 
 .. autoclass:: viser.PointCloudHandle
 
+.. autoclass:: viser.SplineCatmullRomHandle
+
+.. autoclass:: viser.SplineCubicBezierHandle
+
 .. autoclass:: viser.TransformControlsHandle
 
 .. autoclass:: viser.GaussianSplatHandle
+
+.. autoclass:: viser.DirectionalLightHandle
+
+.. autoclass:: viser.AmbientLightHandle
+
+.. autoclass:: viser.HemisphereLightHandle
+
+.. autoclass:: viser.PointLightHandle
+
+.. autoclass:: viser.RectAreaLightHandle
+
+.. autoclass:: viser.SpotLightHandle
 
 <!-- prettier-ignore-end -->

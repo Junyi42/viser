@@ -1,5 +1,5 @@
 import React from "react";
-import { GuiAddMultiSliderMessage } from "../WebsocketMessages";
+import { GuiMultiSliderMessage } from "../WebsocketMessages";
 import { Box, useMantineColorScheme } from "@mantine/core";
 import { GuiComponentContext } from "../ControlPanel/GuiComponentContext";
 import { ViserInputComponent } from "./common";
@@ -7,24 +7,30 @@ import { MultiSlider } from "./MultiSliderPrimitive";
 import { sliderDefaultMarks } from "./ComponentStyles.css";
 
 export default function MultiSliderComponent({
-  id,
-  label,
-  hint,
-  visible,
-  disabled,
+  uuid,
   value,
-  ...otherProps
-}: GuiAddMultiSliderMessage) {
+  props: {
+    label,
+    hint,
+    visible,
+    disabled,
+    min,
+    max,
+    precision,
+    step,
+    _marks: marks,
+    fixed_endpoints,
+    min_range,
+  },
+}: GuiMultiSliderMessage) {
   const { setValue } = React.useContext(GuiComponentContext)!;
   if (!visible) return <></>;
-  const updateValue = (value: number[]) => setValue(id, value);
-  const { min, max, precision, step, marks, fixed_endpoints, min_range } =
-    otherProps;
+  const updateValue = (value: number[]) => setValue(uuid, value);
   const colorScheme = useMantineColorScheme().colorScheme;
   const input = (
     <Box mt="0.2em" mb="0.4em">
       <MultiSlider
-        id={id}
+        id={uuid}
         className={marks === null ? sliderDefaultMarks : undefined}
         size="xs"
         radius="xs"
@@ -66,11 +72,15 @@ export default function MultiSliderComponent({
             ? [
                 {
                   value: min,
-                  label: `${parseInt(min.toFixed(6))}`,
+                  // The regex here removes trailing zeros and the decimal
+                  // point if the number is an integer.
+                  label: `${min.toFixed(6).replace(/\.?0+$/, "")}`,
                 },
                 {
                   value: max,
-                  label: `${parseInt(max.toFixed(6))}`,
+                  // The regex here removes trailing zeros and the decimal
+                  // point if the number is an integer.
+                  label: `${max.toFixed(6).replace(/\.?0+$/, "")}`,
                 },
               ]
             : marks
@@ -82,6 +92,8 @@ export default function MultiSliderComponent({
   );
 
   return (
-    <ViserInputComponent {...{ id, hint, label }}>{input}</ViserInputComponent>
+    <ViserInputComponent {...{ uuid, hint, label }}>
+      {input}
+    </ViserInputComponent>
   );
 }

@@ -1,5 +1,5 @@
 import React from "react";
-import { GuiAddSliderMessage } from "../WebsocketMessages";
+import { GuiSliderMessage } from "../WebsocketMessages";
 import {
   Slider,
   Flex,
@@ -11,23 +11,28 @@ import { ViserInputComponent } from "./common";
 import { sliderDefaultMarks } from "./ComponentStyles.css";
 
 export default function SliderComponent({
-  id,
-  label,
-  hint,
-  visible,
-  disabled,
+  uuid,
   value,
-  ...otherProps
-}: GuiAddSliderMessage) {
+  props: {
+    label,
+    hint,
+    visible,
+    disabled,
+    min,
+    max,
+    precision,
+    step,
+    _marks: marks,
+  },
+}: GuiSliderMessage) {
   const { setValue } = React.useContext(GuiComponentContext)!;
   if (!visible) return <></>;
-  const updateValue = (value: number) => setValue(id, value);
-  const { min, max, precision, step, marks } = otherProps;
+  const updateValue = (value: number) => setValue(uuid, value);
   const colorScheme = useMantineColorScheme().colorScheme;
   const input = (
     <Flex justify="space-between">
       <Slider
-        id={id}
+        id={uuid}
         className={marks === null ? sliderDefaultMarks : undefined}
         size="xs"
         thumbSize={0}
@@ -72,11 +77,15 @@ export default function SliderComponent({
             ? [
                 {
                   value: min,
-                  label: `${parseInt(min.toFixed(6))}`,
+                  // The regex here removes trailing zeros and the decimal
+                  // point if the number is an integer.
+                  label: `${min.toFixed(6).replace(/\.?0+$/, "")}`,
                 },
                 {
                   value: max,
-                  label: `${parseInt(max.toFixed(6))}`,
+                  // The regex here removes trailing zeros and the decimal
+                  // point if the number is an integer.
+                  label: `${max.toFixed(6).replace(/\.?0+$/, "")}`,
                 },
               ]
             : marks
@@ -110,6 +119,8 @@ export default function SliderComponent({
   );
 
   return (
-    <ViserInputComponent {...{ id, hint, label }}>{input}</ViserInputComponent>
+    <ViserInputComponent {...{ uuid, hint, label }}>
+      {input}
+    </ViserInputComponent>
   );
 }

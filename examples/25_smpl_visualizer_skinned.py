@@ -19,7 +19,6 @@ from pathlib import Path
 from typing import List, Tuple
 
 import numpy as np
-import numpy as onp
 import tyro
 
 import viser
@@ -27,35 +26,41 @@ import viser.transforms as tf
 
 
 @dataclass(frozen=True)
-class SmplOutputs:
-    vertices: np.ndarray
-    faces: np.ndarray
+class SmplFkOutputs:
     T_world_joint: np.ndarray  # (num_joints, 4, 4)
     T_parent_joint: np.ndarray  # (num_joints, 4, 4)
 
 
 class SmplHelper:
-    """Helper for models in the SMPL family, implemented in numpy."""
+    """Helper for models in the SMPL family, implemented in numpy. Does not include blend skinning."""
 
     def __init__(self, model_path: Path) -> None:
         assert model_path.suffix.lower() == ".npz", "Model should be an .npz file!"
-        body_dict = dict(**onp.load(model_path, allow_pickle=True))
+        body_dict = dict(**np.load(model_path, allow_pickle=True))
 
-        self._J_regressor = body_dict["J_regressor"]
-        self._weights = body_dict["weights"]
-        self._v_template = body_dict["v_template"]
-        self._posedirs = body_dict["posedirs"]
-        self._shapedirs = body_dict["shapedirs"]
-        self._faces = body_dict["f"]
+        self.J_regressor = body_dict["J_regressor"]
+        self.weights = body_dict["weights"]
+        self.v_template = body_dict["v_template"]
+        self.posedirs = body_dict["posedirs"]
+        self.shapedirs = body_dict["shapedirs"]
+        self.faces = body_dict["f"]
 
-        self.num_joints: int = self._weights.shape[-1]
-        self.num_betas: int = self._shapedirs.shape[-1]
+        self.num_joints: int = self.weights.shape[-1]
+        self.num_betas: int = self.shapedirs.shape[-1]
         self.parent_idx: np.ndarray = body_dict["kintree_table"][0]
 
-    def get_outputs(self, betas: np.ndarray, joint_rotmats: np.ndarray) -> SmplOutputs:
+    def get_tpose(self, betas: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         # Get shaped vertices + joint positions, when all local poses are identity.
-        v_tpose = self._v_template + np.einsum("vxb,b->vx", self._shapedirs, betas)
-        j_tpose = np.einsum("jv,vx->jx", self._J_regressor, v_tpose)
+        v_tpose = self.v_template + np.einsum("vxb,b->vx", self.shapedirs, betas)
+        j_tpose = np.einsum("jv,vx->jx", self.J_regressor, v_tpose)
+        return v_tpose, j_tpose
+
+    def get_outputs(
+        self, betas: np.ndarray, joint_rotmats: np.ndarray
+    ) -> SmplFkOutputs:
+        # Get shaped vertices + joint positions, when all local poses are identity.
+        v_tpose = self.v_template + np.einsum("vxb,b->vx", self.shapedirs, betas)
+        j_tpose = np.einsum("jv,vx->jx", self.J_regressor, v_tpose)
 
         # Local SE(3) transforms.
         T_parent_joint = np.zeros((self.num_joints, 4, 4)) + np.eye(4)
@@ -68,15 +73,7 @@ class SmplHelper:
         for i in range(1, self.num_joints):
             T_world_joint[i] = T_world_joint[self.parent_idx[i]] @ T_parent_joint[i]
 
-        # Linear blend skinning.
-        pose_delta = (joint_rotmats[1:, ...] - np.eye(3)).flatten()
-        v_blend = v_tpose + np.einsum("byn,n->by", self._posedirs, pose_delta)
-        v_delta = np.ones((v_blend.shape[0], self.num_joints, 4))
-        v_delta[:, :, :3] = v_blend[:, None, :] - j_tpose[None, :, :]
-        v_posed = np.einsum(
-            "jxy,vj,vjy->vx", T_world_joint[:, :3, :], self._weights, v_delta
-        )
-        return SmplOutputs(v_posed, self._faces, T_world_joint, T_parent_joint)
+        return SmplFkOutputs(T_world_joint, T_parent_joint)
 
 
 def main(model_path: Path) -> None:
@@ -93,23 +90,14 @@ def main(model_path: Path) -> None:
         num_joints=model.num_joints,
         parent_idx=model.parent_idx,
     )
-    smpl_outputs = model.get_outputs(
-        betas=np.array([x.value for x in gui_elements.gui_betas]),
-        joint_rotmats=onp.zeros((model.num_joints, 3, 3)) + onp.eye(3),
-    )
-
-    bone_wxyzs = np.array(
-        [tf.SO3.from_matrix(R).wxyz for R in smpl_outputs.T_world_joint[:, :3, :3]]
-    )
-    bone_positions = smpl_outputs.T_world_joint[:, :3, 3]
-
-    skinned_handle = server.scene.add_mesh_skinned(
+    v_tpose, j_tpose = model.get_tpose(np.zeros((model.num_betas,)))
+    mesh_handle = server.scene.add_mesh_skinned(
         "/human",
-        smpl_outputs.vertices,
-        smpl_outputs.faces,
-        bone_wxyzs=bone_wxyzs,
-        bone_positions=bone_positions,
-        skin_weights=model._weights,
+        v_tpose,
+        model.faces,
+        bone_wxyzs=tf.SO3.identity(batch_axes=(model.num_joints,)).wxyz,
+        bone_positions=j_tpose,
+        skin_weights=model.weights,
         wireframe=gui_elements.gui_wireframe.value,
         color=gui_elements.gui_rgb.value,
     )
@@ -120,7 +108,19 @@ def main(model_path: Path) -> None:
         if not gui_elements.changed:
             continue
 
+        # Shapes changed: update vertices / joint positions.
+        if gui_elements.betas_changed:
+            v_tpose, j_tpose = model.get_tpose(
+                np.array([gui_beta.value for gui_beta in gui_elements.gui_betas])
+            )
+            mesh_handle.vertices = v_tpose
+            mesh_handle.bone_positions = j_tpose
+
         gui_elements.changed = False
+        gui_elements.betas_changed = False
+
+        # Render as wireframe?
+        mesh_handle.wireframe = gui_elements.gui_wireframe.value
 
         # Compute SMPL outputs.
         smpl_outputs = model.get_outputs(
@@ -137,10 +137,10 @@ def main(model_path: Path) -> None:
         # Match transform control gizmos to joint positions.
         for i, control in enumerate(gui_elements.transform_controls):
             control.position = smpl_outputs.T_parent_joint[i, :3, 3]
-            skinned_handle.bones[i].wxyz = tf.SO3.from_matrix(
+            mesh_handle.bones[i].wxyz = tf.SO3.from_matrix(
                 smpl_outputs.T_world_joint[i, :3, :3]
             ).wxyz
-            skinned_handle.bones[i].position = smpl_outputs.T_world_joint[i, :3, 3]
+            mesh_handle.bones[i].position = smpl_outputs.T_world_joint[i, :3, 3]
 
 
 @dataclass
@@ -154,7 +154,10 @@ class GuiElements:
     transform_controls: List[viser.TransformControlsHandle]
 
     changed: bool
-    """This flag will be flipped to True whenever the mesh needs to be re-generated."""
+    """This flag will be flipped to True whenever any input is changed."""
+
+    betas_changed: bool
+    """This flag will be flipped to True whenever the shape changes."""
 
 
 def make_gui_elements(
@@ -168,13 +171,20 @@ def make_gui_elements(
     tab_group = server.gui.add_tab_group()
 
     def set_changed(_) -> None:
-        out.changed = True  # out is define later!
+        out.changed = True  # out is defined later!
+
+    def set_betas_changed(_) -> None:
+        out.betas_changed = True
+        out.changed = True
 
     # GUI elements: mesh settings + visibility.
     with tab_group.add_tab("View", viser.Icon.VIEWFINDER):
         gui_rgb = server.gui.add_rgb("Color", initial_value=(90, 200, 255))
         gui_wireframe = server.gui.add_checkbox("Wireframe", initial_value=False)
         gui_show_controls = server.gui.add_checkbox("Handles", initial_value=True)
+        gui_control_size = server.gui.add_slider(
+            "Handle size", min=0.0, max=10.0, step=0.01, initial_value=1.0
+        )
 
         gui_rgb.on_update(set_changed)
         gui_wireframe.on_update(set_changed)
@@ -183,6 +193,16 @@ def make_gui_elements(
         def _(_):
             for control in transform_controls:
                 control.visible = gui_show_controls.value
+
+        @gui_control_size.on_update
+        def _(_):
+            for control in transform_controls:
+                prefixed_joint_name = control.name
+                control.scale = (
+                    0.2
+                    * (0.75 ** prefixed_joint_name.count("/"))
+                    * gui_control_size.value
+                )
 
     # GUI elements: shape parameters.
     with tab_group.add_tab("Shape", viser.Icon.BOX):
@@ -197,7 +217,7 @@ def make_gui_elements(
         @gui_random_shape.on_click
         def _(_):
             for beta in gui_betas:
-                beta.value = onp.random.normal(loc=0.0, scale=1.0)
+                beta.value = np.random.normal(loc=0.0, scale=1.0)
 
         gui_betas = []
         for i in range(num_betas):
@@ -205,7 +225,7 @@ def make_gui_elements(
                 f"beta{i}", min=-5.0, max=5.0, step=0.01, initial_value=0.0
             )
             gui_betas.append(beta)
-            beta.on_update(set_changed)
+            beta.on_update(set_betas_changed)
 
     # GUI elements: joint angles.
     with tab_group.add_tab("Joints", viser.Icon.ANGLE):
@@ -219,12 +239,9 @@ def make_gui_elements(
 
         @gui_random_joints.on_click
         def _(_):
+            rng = np.random.default_rng()
             for joint in gui_joints:
-                # It's hard to uniformly sample orientations directly in so(3), so we
-                # first sample on S^3 and then convert.
-                quat = onp.random.normal(loc=0.0, scale=1.0, size=(4,))
-                quat /= onp.linalg.norm(quat)
-                joint.value = tf.SO3(wxyz=quat).log()
+                joint.value = tf.SO3.sample_uniform(rng).log()
 
         gui_joints: List[viser.GuiInputHandle[Tuple[float, float, float]]] = []
         for i in range(num_joints):
@@ -280,6 +297,7 @@ def make_gui_elements(
         gui_joints,
         transform_controls=transform_controls,
         changed=True,
+        betas_changed=False,
     )
     return out
 

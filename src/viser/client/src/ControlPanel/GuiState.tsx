@@ -1,31 +1,30 @@
-import * as Messages from "../WebsocketMessages";
 import React from "react";
 import { create } from "zustand";
 import { ColorTranslator } from "colortranslator";
 
 import { immer } from "zustand/middleware/immer";
-
-export type GuiConfig = Messages.GuiAddComponentMessage;
-
-export function isGuiConfig(message: Messages.Message): message is GuiConfig {
-  return message.type.startsWith("GuiAdd");
-}
+import {
+  GuiComponentMessage,
+  GuiModalMessage,
+  ThemeConfigurationMessage,
+} from "../WebsocketMessages";
 
 interface GuiState {
-  theme: Messages.ThemeConfigurationMessage;
+  theme: ThemeConfigurationMessage;
   label: string;
   server: string;
   shareUrl: string | null;
   websocketConnected: boolean;
   backgroundAvailable: boolean;
-  guiIdSetFromContainerId: {
-    [containerId: string]: { [id: string]: true } | undefined;
+  showOrbitOriginTool: boolean;
+  guiUuidSetFromContainerUuid: {
+    [containerUuid: string]: { [uuid: string]: true } | undefined;
   };
-  modals: Messages.GuiModalMessage[];
-  guiOrderFromId: { [id: string]: number };
-  guiConfigFromId: { [id: string]: GuiConfig };
+  modals: GuiModalMessage[];
+  guiOrderFromUuid: { [id: string]: number };
+  guiConfigFromUuid: { [id: string]: GuiComponentMessage | undefined };
   uploadsInProgress: {
-    [id: string]: {
+    [uuid: string]: {
       notificationId: string;
       uploadedBytes: number;
       totalBytes: number;
@@ -35,10 +34,10 @@ interface GuiState {
 }
 
 interface GuiActions {
-  setTheme: (theme: Messages.ThemeConfigurationMessage) => void;
+  setTheme: (theme: ThemeConfigurationMessage) => void;
   setShareUrl: (share_url: string | null) => void;
-  addGui: (config: GuiConfig) => void;
-  addModal: (config: Messages.GuiModalMessage) => void;
+  addGui: (config: GuiComponentMessage) => void;
+  addModal: (config: GuiModalMessage) => void;
   removeModal: (id: string) => void;
   updateGuiProps: (id: string, updates: { [key: string]: any }) => void;
   removeGui: (id: string) => void;
@@ -67,10 +66,11 @@ const cleanGuiState: GuiState = {
   shareUrl: null,
   websocketConnected: false,
   backgroundAvailable: false,
-  guiIdSetFromContainerId: {},
+  showOrbitOriginTool: false,
+  guiUuidSetFromContainerUuid: {},
   modals: [],
-  guiOrderFromId: {},
-  guiConfigFromId: {},
+  guiOrderFromUuid: {},
+  guiConfigFromUuid: {},
   uploadsInProgress: {},
 };
 
@@ -102,13 +102,15 @@ export function useGuiState(initialServer: string) {
           }),
         addGui: (guiConfig) =>
           set((state) => {
-            state.guiOrderFromId[guiConfig.id] = guiConfig.order;
-            state.guiConfigFromId[guiConfig.id] = guiConfig;
-            if (!(guiConfig.container_id in state.guiIdSetFromContainerId)) {
-              state.guiIdSetFromContainerId[guiConfig.container_id] = {};
+            state.guiOrderFromUuid[guiConfig.uuid] = guiConfig.props.order;
+            state.guiConfigFromUuid[guiConfig.uuid] = guiConfig;
+            if (
+              !(guiConfig.container_uuid in state.guiUuidSetFromContainerUuid)
+            ) {
+              state.guiUuidSetFromContainerUuid[guiConfig.container_uuid] = {};
             }
-            state.guiIdSetFromContainerId[guiConfig.container_id]![
-              guiConfig.id
+            state.guiUuidSetFromContainerUuid[guiConfig.container_uuid]![
+              guiConfig.uuid
             ] = true;
           }),
         addModal: (modalConfig) =>
@@ -117,21 +119,30 @@ export function useGuiState(initialServer: string) {
           }),
         removeModal: (id) =>
           set((state) => {
-            state.modals = state.modals.filter((m) => m.id !== id);
+            state.modals = state.modals.filter((m) => m.uuid !== id);
           }),
         removeGui: (id) =>
           set((state) => {
-            const guiConfig = state.guiConfigFromId[id];
-
-            delete state.guiIdSetFromContainerId[guiConfig.container_id]![id];
-            delete state.guiOrderFromId[id];
-            delete state.guiConfigFromId[id];
+            const guiConfig = state.guiConfigFromUuid[id];
+            if (guiConfig == undefined) {
+              // TODO: this will currently happen when GUI elements are removed
+              // and then a new client connects. Needs to be revisited.
+              console.warn("(OK) Tried to remove non-existent component", id);
+              return;
+            }
+            delete state.guiUuidSetFromContainerUuid[guiConfig.container_uuid]![
+              id
+            ];
+            delete state.guiOrderFromUuid[id];
+            delete state.guiConfigFromUuid[id];
             if (
               Object.keys(
-                state.guiIdSetFromContainerId[guiConfig.container_id]!,
+                state.guiUuidSetFromContainerUuid[guiConfig.container_uuid]!,
               ).length == 0
             )
-              delete state.guiIdSetFromContainerId[guiConfig.container_id];
+              delete state.guiUuidSetFromContainerUuid[
+                guiConfig.container_uuid
+              ];
           }),
         resetGui: () =>
           set((state) => {
@@ -142,10 +153,10 @@ export function useGuiState(initialServer: string) {
 
             // This feels brittle, could be cleaned up...
             state.shareUrl = null;
-            state.guiIdSetFromContainerId = {};
+            state.guiUuidSetFromContainerUuid = {};
             state.modals = [];
-            state.guiOrderFromId = {};
-            state.guiConfigFromId = {};
+            state.guiOrderFromUuid = {};
+            state.guiConfigFromUuid = {};
             state.uploadsInProgress = {};
           }),
         updateUploadState: (state) =>
@@ -158,24 +169,30 @@ export function useGuiState(initialServer: string) {
           }),
         updateGuiProps: (id, updates) => {
           set((state) => {
-            const config = state.guiConfigFromId[id];
+            const config = state.guiConfigFromUuid[id];
             if (config === undefined) {
-              console.error("Tried to update non-existent component", id);
+              console.error(
+                `Tried to update non-existent component '${id}' with`,
+                updates,
+              );
               return;
             }
 
-            // Double-check that key exists.
-            Object.keys(updates).forEach((key) => {
-              if (!(key in config))
+            // Iterate over key/value pairs.
+            for (const [key, value] of Object.entries(updates)) {
+              // We don't put `value` in the props object to make types
+              // stronger in the user-facing Python API. This results in some
+              // nastiness here, we should revisit...
+              if (key === "value") {
+                (state.guiConfigFromUuid[id] as any).value = value;
+              } else if (!(key in config.props)) {
                 console.error(
                   `Tried to update nonexistent property '${key}' of GUI element ${id}!`,
                 );
-            });
-
-            state.guiConfigFromId[id] = {
-              ...config,
-              ...updates,
-            } as GuiConfig;
+              } else {
+                (config.props as any)[key] = value;
+              }
+            }
           });
         },
       })),

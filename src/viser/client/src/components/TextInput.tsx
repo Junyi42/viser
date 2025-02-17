@@ -1,20 +1,23 @@
 import * as React from "react";
 import { TextInput } from "@mantine/core";
 import { ViserInputComponent } from "./common";
-import { GuiAddTextMessage } from "../WebsocketMessages";
+import { GuiTextMessage } from "../WebsocketMessages";
 import { GuiComponentContext } from "../ControlPanel/GuiComponentContext";
 
-export default function TextInputComponent(props: GuiAddTextMessage) {
-  const { id, hint, label, value, disabled, visible } = props;
+export default function TextInputComponent({
+  uuid,
+  value,
+  props: { hint, label, disabled, visible },
+}: GuiTextMessage) {
   const { setValue } = React.useContext(GuiComponentContext)!;
   if (!visible) return <></>;
   return (
-    <ViserInputComponent {...{ id, hint, label }}>
+    <ViserInputComponent {...{ uuid, hint, label }}>
       <TextInput
         value={value}
         size="xs"
         onChange={(value) => {
-          setValue(id, value.target.value);
+          setValue(uuid, value.target.value);
         }}
         styles={{
           input: {

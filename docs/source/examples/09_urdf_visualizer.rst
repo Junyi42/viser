@@ -25,10 +25,11 @@ and viser. It can also take a path to a local URDF file as input.
         import time
         from typing import Literal
 
-        import numpy as onp
+        import numpy as np
         import tyro
-        import viser
         from robot_descriptions.loaders.yourdfpy import load_robot_description
+
+        import viser
         from viser.extras import ViserUrdf
 
 
@@ -43,8 +44,8 @@ and viser. It can also take a path to a local URDF file as input.
                 lower,
                 upper,
             ) in viser_urdf.get_actuated_joint_limits().items():
-                lower = lower if lower is not None else -onp.pi
-                upper = upper if upper is not None else onp.pi
+                lower = lower if lower is not None else -np.pi
+                upper = upper if upper is not None else np.pi
                 initial_pos = 0.0 if lower < 0 and upper > 0 else (lower + upper) / 2.0
                 slider = server.gui.add_slider(
                     label=joint_name,
@@ -55,7 +56,7 @@ and viser. It can also take a path to a local URDF file as input.
                 )
                 slider.on_update(  # When sliders move, we update the URDF configuration.
                     lambda _: viser_urdf.update_cfg(
-                        onp.array([slider.value for slider in slider_handles])
+                        np.array([slider.value for slider in slider_handles])
                     )
                 )
                 slider_handles.append(slider)
@@ -80,6 +81,7 @@ and viser. It can also take a path to a local URDF file as input.
         ) -> None:
             # Start viser server.
             server = viser.ViserServer()
+            server.scene.enable_default_lights(cast_shadow=True)
 
             # Load URDF.
             #
@@ -96,7 +98,20 @@ and viser. It can also take a path to a local URDF file as input.
                 )
 
             # Set initial robot configuration.
-            viser_urdf.update_cfg(onp.array(initial_config))
+            viser_urdf.update_cfg(np.array(initial_config))
+
+            # Create grid.
+            server.scene.add_grid(
+                "/grid",
+                width=2,
+                height=2,
+                position=(
+                    0.0,
+                    0.0,
+                    # Get the minimum z value of the trimesh scene.
+                    viser_urdf._urdf.scene.bounds[0, 2],
+                ),
+            )
 
             # Create joint reset button.
             reset_button = server.gui.add_button("Reset")
