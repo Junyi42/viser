@@ -20,9 +20,9 @@ class Record3dLoader_Customized_Megasam:
 
     def __init__(self, npz_data: dict, conf_threshold: float = 1.0, foreground_conf_threshold: float = 0.1, no_mask: bool = False, xyzw=True, init_conf=False):
         # Assuming npz_data is a dictionary containing all the necessary arrays from the NPZ file
-        self.K = npz_data['intrinsic']  # Intrinsic matrix
-        self.K = np.repeat(self.K, npz_data['images'].shape[0], axis=0)
-        self.T_world_cameras = npz_data['cam_c2w']  # Camera poses (extrinsics)
+        self.K = np.expand_dims(npz_data['intrinsic'], 0)               # (3,3) -> (1,3,3) Intrinsic matrix
+        self.K = np.repeat(self.K, npz_data['images'].shape[0], axis=0) # (1,3,3) -> (N,3,3)
+        self.T_world_cameras = npz_data['cam_c2w']                      # (N,4,4) Camera poses (extrinsics)
         self.fps = 30  # Assuming a frame rate of 30
         self.conf_threshold = conf_threshold
         self.foreground_conf_threshold = foreground_conf_threshold
@@ -32,8 +32,8 @@ class Record3dLoader_Customized_Megasam:
         self.init_conf = init_conf
         
         # Read frames from the NPZ file
-        self.images = npz_data['images']
-        self.depths = npz_data['depths']
+        self.images = npz_data['images']                                # (N,H,W,3) RGB images
+        self.depths = npz_data['depths']                                # (N,H,W) Depth maps
         self.confidences = npz_data.get('conf', [])
         self.init_conf_data = npz_data.get('init_conf', [])
         self.masks = npz_data.get('enlarged_dynamic_mask', [])
