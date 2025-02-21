@@ -17,48 +17,6 @@ import cv2
 import numpy as np
 import argparse
 
-def save_npz_data(npz_path, output_dir, seq_name=""):
-    # Load the NPZ file
-    npzfile = np.load(npz_path)
-    
-    # If seq_name is empty, use the last part of the npz_path (filename without extension)
-    if not seq_name:
-        seq_name = os.path.splitext(os.path.basename(npz_path))[0]
-
-    # Create the output directory if it doesn't exist
-    os.makedirs(output_dir, exist_ok=True)
-
-    # Save images as PNG files
-    image_dir = os.path.join(output_dir, seq_name)
-    os.makedirs(image_dir, exist_ok=True)
-    for i in range(npzfile['images'].shape[0]):
-        img = npzfile['images'][i]
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        cv2.imwrite(f"{image_dir}/frame_{i:04d}.png", img)
-
-    # Save depth maps as .npy files
-    depth_dir = os.path.join(output_dir, seq_name)
-    os.makedirs(depth_dir, exist_ok=True)
-    for i in range(npzfile['depths'].shape[0]):
-        depth = npzfile['depths'][i]
-        np.save(f"{depth_dir}/frame_{i:04d}.npy", depth)
-
-    # Save intrinsics to a text file
-    intrinsic_file = os.path.join(output_dir, seq_name, 'pred_intrinsics.txt')
-    intrinsics = npzfile['intrinsic']
-    with open(intrinsic_file, "w") as f:
-        for i in range(npzfile['images'].shape[0]):
-            f.write(" ".join(map(str, intrinsics.ravel())) + "\n")
-
-    # Save extrinsics to a text file
-    traj_file = os.path.join(output_dir, seq_name, 'pred_traj.txt')
-    extrinsics = npzfile['cam_c2w']
-    with open(traj_file, "w") as f:
-        for i in range(npzfile['images'].shape[0]):
-            f.write(" ".join(map(str, extrinsics[i].ravel())) + "\n")
-
-    return image_dir
-
 def main(
     data: Path = "./demo_tmp/NULL.npz",
     downsample_factor: int = 1,
@@ -76,10 +34,8 @@ def main(
     cam_thickness: float = 1.5,
 ) -> None:
     from pathlib import Path  # <-- Import Path here if not already imported
-    tmp_output_dir = Path("./tmp_viser_result")
-    os.makedirs(tmp_output_dir, exist_ok=True)
-    data = save_npz_data(data, tmp_output_dir)
-    data = Path(data)
+
+    data = np.load(data)
     
     server = viser.ViserServer()
     if share:

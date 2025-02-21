@@ -16,102 +16,68 @@ from scipy.spatial.transform import Rotation
 from scipy.spatial import cKDTree
 
 class Record3dLoader_Customized_Megasam:
-    """Helper for loading frames for Record3D captures."""
+    """Helper for loading frames for Record3D captures directly from a NPZ file."""
 
-    def __init__(self, data_dir: Path, conf_threshold: float = 1.0, foreground_conf_threshold: float = 0.1, no_mask: bool = False, xyzw=True, init_conf=False):
-
-        # Read metadata.
-        intrinsics_path = data_dir / "pred_intrinsics.txt"
-        intrinsics = np.loadtxt(intrinsics_path)
-
-        self.K: onp.ndarray = np.array(intrinsics, np.float32).reshape(-1, 3, 3)
-        fps = 30
-
-        self.init_conf = init_conf
-
-        poses_path = data_dir / "pred_traj.txt"
-        poses = np.loadtxt(poses_path)
-        self.T_world_cameras: onp.ndarray = np.array(poses, np.float32)
-        self.T_world_cameras = self.T_world_cameras.reshape(-1,4,4).astype(np.float32)
-
-        self.fps = fps
+    def __init__(self, npz_data: dict, conf_threshold: float = 1.0, foreground_conf_threshold: float = 0.1, no_mask: bool = False, xyzw=True, init_conf=False):
+        # Assuming npz_data is a dictionary containing all the necessary arrays from the NPZ file
+        self.K = npz_data['intrinsic']  # Intrinsic matrix
+        self.K = np.repeat(self.K, npz_data['images'].shape[0], axis=0)
+        self.T_world_cameras = npz_data['cam_c2w']  # Camera poses (extrinsics)
+        self.fps = 30  # Assuming a frame rate of 30
         self.conf_threshold = conf_threshold
         self.foreground_conf_threshold = foreground_conf_threshold
         self.no_mask = no_mask
 
-        # Read frames.
-        self.rgb_paths = sorted(data_dir.glob("frame_*.png"), key=lambda p: int(p.stem.split("_")[-1]))
-        self.depth_paths = sorted(data_dir.glob("frame_*.npy"), key=lambda p: int(p.stem.split("_")[-1]))
-        if init_conf:
-            self.init_conf_paths = sorted(data_dir.glob("init_conf_*.npy"), key=lambda p: int(p.stem.split("_")[-1]))
-        else:
-            self.init_conf_paths = []
-        self.conf_paths = sorted(data_dir.glob("conf_*.npy"), key=lambda p: int(p.stem.split("_")[-1]))
-        self.mask_paths = sorted(data_dir.glob("enlarged_dynamic_mask_*.png"), key=lambda p: int(p.stem.split("_")[-1]))
-
-        # Remove the last frame since it does not have a ground truth dynamic mask
-        self.rgb_paths = self.rgb_paths[:-1]
+        # Initialize the other parameters
+        self.init_conf = init_conf
+        
+        # Read frames from the NPZ file
+        self.images = npz_data['images']
+        self.depths = npz_data['depths']
+        self.confidences = npz_data.get('conf', [])
+        self.init_conf_data = npz_data.get('init_conf', [])
+        self.masks = npz_data.get('enlarged_dynamic_mask', [])
 
         # Align all camera poses by the first frame
         T0 = self.T_world_cameras[len(self.T_world_cameras) // 2]  # First camera pose (4x4 matrix)
-        T0_inv = np.linalg.inv(T0)    # Inverse of the first camera pose
+        T0_inv = np.linalg.inv(T0)  # Inverse of the first camera pose
 
         # Apply T0_inv to all camera poses
         self.T_world_cameras = np.matmul(T0_inv[np.newaxis, :, :], self.T_world_cameras)
 
-
     def num_frames(self) -> int:
-        return len(self.rgb_paths)
+        return len(self.images)
 
     def get_frame(self, index: int) -> Record3dFrame:
+        # Read the depth for the given frame
+        depth = self.depths[index]
+        depth = depth.astype(np.float32)
 
-        # Read depth.
-        depth = np.load(self.depth_paths[index])
-        depth: onp.NDArray[onp.float32] = depth
-        
         # Check if conf file exists, otherwise initialize with ones
-        if len(self.conf_paths) == 0:
-            conf = np.ones_like(depth, dtype=onp.float32)
+        if len(self.confidences) == 0:
+            conf = np.ones_like(depth, dtype=np.float32)
         else:
-            conf_path = self.conf_paths[index]
-            if os.path.exists(conf_path):
-                conf = np.load(conf_path)
-                conf: onpt.NDArray[onp.float32] = conf
-                # Clip confidence to avoid negative values
-                conf = np.clip(conf, 0.0001, 99999)
-            else:
-                conf = np.ones_like(depth, dtype=onp.float32)
+            conf = self.confidences[index]
+            conf = np.clip(conf, 0.0001, 99999)
 
         # Check if init conf file exists, otherwise initialize with ones
-        if len(self.init_conf_paths) == 0:  # If init conf is not available, use conf
+        if len(self.init_conf_data) == 0:
             init_conf = conf
         else:
-            init_conf_path = self.init_conf_paths[index]
-            if os.path.exists(init_conf_path):
-                init_conf = np.load(init_conf_path)
-                init_conf: onpt.NDArray[onp.float32] = init_conf
-                # Clip confidence to avoid negative values
-                init_conf = np.clip(init_conf, 0.0001, 99999)
-            else:
-                init_conf = np.ones_like(depth, dtype=onp.float32)
+            init_conf = self.init_conf_data[index]
+            init_conf = np.clip(init_conf, 0.0001, 99999)
         
-        # Check if mask file exists, otherwise initialize with zeros
-        if len(self.mask_paths) == 0:
-            mask = np.ones_like(depth, dtype=onp.bool_)
+        # Check if mask exists, otherwise initialize with zeros
+        if len(self.masks) == 0:
+            mask = np.ones_like(depth, dtype=bool)
         else:
-            mask_path = self.mask_paths[index]
-            if os.path.exists(mask_path):
-                mask = iio.imread(mask_path) > 0
-                mask: onpt.NDArray[onp.bool_] = mask
-            else:
-                mask = np.ones_like(depth, dtype=onp.bool_)
+            mask = self.masks[index] > 0  # Assuming mask is a binary image
 
         if self.no_mask:
             mask = np.ones_like(mask).astype(np.bool_)
 
-        # Read RGB.
-        rgb = iio.imread(self.rgb_paths[index])
-        # if 4 channels, remove the alpha channel
+        # Read RGB image
+        rgb = self.images[index]
         if rgb.shape[-1] == 4:
             rgb = rgb[..., :3]
 
